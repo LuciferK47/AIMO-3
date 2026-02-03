@@ -296,9 +296,12 @@ Problem:
         LLM CASE ENUMERATION → SYMPY COMPUTE
         
         LLM: "List all cases/values to check"
-        SymPy: Compute/validate each case
+        SymPy: Compute/validate each case (enumerate enumeration problem constraints)
         
         Useful for: counting problems, modular arithmetic, optimization
+        
+        NOTE: Case enumeration returns CANDIDATE ANSWERS (not intermediate cases).
+        These candidates are verified in the arbitration stage via constraint checks.
         """
         candidates = []
         
@@ -312,6 +315,7 @@ Rules:
 - Output ONLY JSON: {{"cases": [val1, val2, val3, ...]}}
 - Do NOT compute final answer
 - Just enumerate the search space
+- Each case should be a candidate answer to evaluate
 
 Problem:
 {problem_text}
@@ -319,8 +323,19 @@ Problem:
             response = query_llm_json(enumeration_prompt, max_tokens=200, temperature=0.2)
             if response and isinstance(response.get("cases"), list):
                 for case in response["cases"][:10]:
-                    if isinstance(case, int) and 0 <= case <= 99999:
+                    # Case enumeration returns CANDIDATE answers (not intermediate values)
+                    # These are verified via AnswerArbitrator.arbitrate() → SelfVerificationLoop
+                    if isinstance(case, int) and AnswerValidator.check_range(case):
+                        # Case is a candidate; confidence is 0 (needs verification)
                         candidates.append((case, 0))
+                    elif isinstance(case, str):
+                        # Try to parse string as integer
+                        try:
+                            case_int = int(case)
+                            if AnswerValidator.check_range(case_int):
+                                candidates.append((case_int, 0))
+                        except (ValueError, TypeError):
+                            pass
         
         except Exception as e:
             logger.debug(f"Case enumeration error: {e}")

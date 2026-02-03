@@ -11,6 +11,11 @@ import logging
 from typing import Optional, Tuple, List, Any, Dict, Callable
 from collections import Counter
 
+try:
+    import sympy as sp
+except ImportError:
+    sp = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -148,43 +153,104 @@ class DeterministicVerifier:
     @staticmethod
     def verify_equation(equation_str: str, answer: int, variable: str = 'x') -> bool:
         """
-        Verify answer satisfies an equation.
+        Verify answer satisfies an equation using SymPy (safe).
         
         Args:
-            equation_str: Equation string (e.g., "x^2 + 3x - 10 = 0")
+            equation_str: Equation string (e.g., "x^2 + 3*x - 10 = 0")
             answer: Value to verify
             variable: Variable name (default 'x')
             
         Returns:
-            True if answer satisfies equation
+            True if answer satisfies equation, False otherwise
         """
+        if sp is None:
+            # Fallback: basic check without SymPy
+            try:
+                expr = equation_str.replace(variable, str(answer))
+                # Only allow alphanumeric and basic operators to prevent injection
+                if not re.match(r'^[\d+\-*/(). ]+$', expr):
+                    return False
+                result = eval(expr)  # Safe: validated characters only
+                return abs(result) < 1e-9
+            except Exception:
+                return False
+        
         try:
-            # Replace variable with answer value
-            expr = equation_str.replace(variable, str(answer))
+            # Use SymPy for safe symbolic evaluation
+            var = sp.Symbol(variable)
             
-            # Safely evaluate
-            # Note: Only handles basic arithmetic
-            result = eval(expr)
-            return abs(result) < 1e-9
+            # Handle "=" in equation
+            if '=' in equation_str:
+                lhs_str, rhs_str = equation_str.split('=')
+                lhs = sp.sympify(lhs_str.replace(variable, f"({answer})"))
+                rhs = sp.sympify(rhs_str.replace(variable, f"({answer})"))
+                return sp.simplify(lhs - rhs) == 0
+            else:
+                # Assume equation is set to 0
+                expr = sp.sympify(equation_str.replace(variable, f"({answer})"))
+                return sp.simplify(expr) == 0
         except Exception:
             return False
     
     @staticmethod
     def verify_constraint(constraint: str, answer: int) -> bool:
         """
-        Verify answer satisfies a constraint.
+        Verify answer satisfies a constraint using safe comparison only.
         
         Args:
             constraint: Constraint string (e.g., "answer < 100")
             answer: Value to verify
             
         Returns:
-            True if constraint satisfied
+            True if constraint satisfied, False otherwise
         """
+        if not constraint or not isinstance(answer, int):
+            return False
+        
         try:
-            expr = constraint.replace('answer', str(answer))
-            return bool(eval(expr))
-        except Exception:
+            # Only allow safe comparison operators
+            constraint = constraint.strip()
+            
+            # Support basic comparisons: ==, !=, <, >, <=, >=
+            if '==' in constraint:
+                parts = constraint.split('==')
+                if len(parts) != 2:
+                    return False
+                target = int(parts[1].replace('answer', '').strip())
+                return answer == target
+            elif '!=' in constraint:
+                parts = constraint.split('!=')
+                if len(parts) != 2:
+                    return False
+                target = int(parts[1].replace('answer', '').strip())
+                return answer != target
+            elif '<=' in constraint:
+                parts = constraint.split('<=')
+                if len(parts) != 2:
+                    return False
+                target = int(parts[1].replace('answer', '').strip())
+                return answer <= target
+            elif '>=' in constraint:
+                parts = constraint.split('>=')
+                if len(parts) != 2:
+                    return False
+                target = int(parts[1].replace('answer', '').strip())
+                return answer >= target
+            elif '<' in constraint:
+                parts = constraint.split('<')
+                if len(parts) != 2:
+                    return False
+                target = int(parts[1].replace('answer', '').strip())
+                return answer < target
+            elif '>' in constraint:
+                parts = constraint.split('>')
+                if len(parts) != 2:
+                    return False
+                target = int(parts[1].replace('answer', '').strip())
+                return answer > target
+            else:
+                return False
+        except (ValueError, IndexError, AttributeError):
             return False
 
 
@@ -498,15 +564,29 @@ class AdvancedVerification:
         verified_count = 0
         for eq in equations[:3]:  # Check up to 3 equations
             try:
-                # Replace 'x' with answer
-                test_eq = eq.replace('x', str(answer))
-                test_eq = test_eq.replace('=', '==')
-                
-                # Safe evaluation
-                result = eval(test_eq)
-                if result:
-                    verified_count += 1
+                # Use SymPy for safe verification
+                if sp is not None:
+                    # Equation verification using SymPy
+                    if '=' not in eq:
+                        continue
+                    lhs_str, rhs_str = eq.split('=', 1)
+                    # Safe substitution using SymPy
+                    lhs_val = sp.sympify(lhs_str.replace('x', f"({answer})"))
+                    rhs_val = sp.sympify(rhs_str.replace('x', f"({answer})"))
+                    if sp.simplify(lhs_val - rhs_val) == 0:
+                        verified_count += 1
+                else:
+                    # Fallback: basic string replacement with character validation
+                    test_eq = eq.replace('x', str(answer))
+                    test_eq = test_eq.replace('=', '==')
+                    
+                    # Only evaluate if equation looks safe
+                    if re.match(r'^[\d+\-*/(). ]==[0-9.]+$', test_eq):
+                        result = eval(test_eq)  # Safe: validated regex
+                        if result:
+                            verified_count += 1
             except Exception:
+
                 pass
         
         if len(equations) == 0:

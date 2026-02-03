@@ -237,15 +237,14 @@ confidence *= symbolic_score(answer, problem)
 ```
 .
 ├── submission.py           # API entry point ⭐
-├── solver.py              # AdaptiveSolver class
-├── reasoning.py           # Prompt engineering
-├── verification.py        # Validation logic
-├── parsing.py             # Input processing
-├── models.py              # LLM interface
-├── utils.py               # Utilities
-├── validate.py            # Validation script
+├── solver.py              # StrategyArbiter + AdaptiveSolver classes
+├── sympy_solver.py        # SymPy integration & domain-specific solvers
+├── validation.py          # Verification & confidence scoring
+├── parsing.py             # Input processing & classification
+├── config.py              # Centralized configuration
+├── utils.py               # Utilities (timeouts, LLM calls)
+├── cache.py               # Result caching
 ├── requirements.txt       # Dependencies
-├── TECHNICAL_DESIGN.md    # Full technical spec
 └── README.md              # This file
 ```
 
@@ -253,15 +252,15 @@ confidence *= symbolic_score(answer, problem)
 
 #### `AdaptiveSolver`
 ```python
-solver = AdaptiveSolver(model_name="Qwen/Qwen-Math-7B-Chat")
-ans1, ans2 = solver.solve(problem_text, num_attempts=4, timeout_seconds=30.0)
+solver = AdaptiveSolver()
+ans1, ans2 = solver.solve(problem_text)
 ```
 
 **Features**:
-- Adaptive attempt count based on difficulty
-- Dynamic timeout adjustment
-- Automatic domain classification
-- Ensemble reasoning
+- Multi-strategy candidate generation (SymPy-first)
+- Verification-driven arbitration
+- Confidence scoring (constraint, equation, modular)
+- Cross-platform timeouts
 
 #### `ProblemParser`
 ```python
@@ -301,13 +300,12 @@ ranked = rank_answers_by_confidence(answers, problem)  # List[(answer, confidenc
 ## Deployment Checklist
 
 - [ ] Install dependencies: `pip install -r requirements.txt`
-- [ ] Validate pipeline: `python validate.py`
-- [ ] Test on sample problems: `python submission.py`
+- [ ] Test pipeline: `python submission.py` with sample problems
 - [ ] Verify output format: integers in [0, 99999]
 - [ ] Check memory usage on test set
-- [ ] Run mock private evaluation (2 times)
+- [ ] Run mock evaluation (2 times)
 - [ ] Confirm no hangs or crashes
-- [ ] Prepare error logs
+- [ ] Verify caching works
 - [ ] Final submission ready ✅
 
 ---
@@ -344,12 +342,26 @@ return (ans1, ans2)
 
 ## Technical Specification
 
-For detailed technical documentation, see [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md):
-- System architecture diagrams
-- Model selection rationale
-- Scoring optimization math
-- Failure-mode analysis
-- Complete pseudocode
+### Pipeline Stages
+
+1. **Problem Parsing**: Normalize LaTeX, extract constraints and metadata
+2. **Classification**: Determine domain (algebra, geometry, combinatorics, etc.)
+3. **Candidate Generation**: 4-strategy approach
+   - **SymPy Direct**: Solve symbolically without LLM
+   - **Translation**: LLM → Equations → SymPy solve
+   - **Enumeration**: LLM → Cases → Evaluate each
+   - **Formalization**: LLM → Expression → Compute
+4. **Verification**: Check constraints, modular bounds, equation satisfaction
+5. **Arbitration**: Score by confidence, return top-2 unique answers
+
+### Configuration
+
+Edit `config.py` to customize:
+- `LLM_CLIENT`: "openai" or "anthropic"
+- `LLM_MODEL`: Model name
+- `MAX_CANDIDATES_PER_PROBLEM`: Hard cap on generation
+- `USE_FIXED_SEED`: Determinism flag
+- Temperature and token limits
 
 ---
 
@@ -400,10 +412,10 @@ This pipeline was designed for the AI Mathematical Olympiad Progress Prize 3.
 ## Support
 
 For issues, questions, or improvements:
-1. Check TECHNICAL_DESIGN.md for design details
-2. Run `python validate.py` to diagnose problems
-3. Review logs in submission.py (stderr)
-4. Check model compatibility with `transformers` library
+1. Review `solver.py` for pipeline logic
+2. Check `config.py` for configuration options
+3. Review logs in `submission.py` (stderr)
+4. Verify LLM API keys are set in environment
 
 ---
 

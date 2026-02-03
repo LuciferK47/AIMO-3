@@ -247,24 +247,87 @@ class SymPySolver:
     
     @staticmethod
     def solve_from_equations(equations: List[str], problem_text: str = "") -> Optional[Tuple[int, int]]:
-        """Solve from extracted equations."""
+        """
+        Solve multi-equation systems.
+        
+        Supports:
+        - Single equation in one variable
+        - Multiple equations (system solving)
+        - Auto-detection of variables
+        
+        Returns: (solution_value, confidence) or None
+        """
         if not SYMPY_AVAILABLE or not equations:
             return None
         
         try:
-            # Try to solve the first equation
+            # Extract all unique variables from equations
+            all_vars = set()
+            for eq in equations:
+                # Find all letter sequences (variable names)
+                vars_in_eq = set(re.findall(r'[a-zA-Z_]\w*', eq))
+                all_vars.update(vars_in_eq)
+            
+            if not all_vars:
+                return None
+            
+            # Sort variables for consistency
+            var_list = sorted(list(all_vars))
+            
+            # Try system solving with all equations if multiple
+            if len(equations) > 1 and len(var_list) <= 3:
+                try:
+                    sympy_eqs = []
+                    for eq_str in equations[:5]:  # Limit to 5 equations
+                        if '=' not in eq_str:
+                            continue
+                        lhs, rhs = eq_str.split('=', 1)
+                        sympy_eqs.append(sp.Eq(sp.sympify(lhs), sp.sympify(rhs)))
+                    
+                    if sympy_eqs:
+                        symbols = sp.symbols(' '.join(var_list))
+                        if not isinstance(symbols, tuple):
+                            symbols = (symbols,)
+                        
+                        # Solve system
+                        solutions = sp.solve(sympy_eqs, symbols, dict=True)
+                        
+                        if solutions:
+                            # Try to extract integer solutions
+                            for sol_dict in solutions:
+                                # Find first integer variable in solution
+                                for var_sym, val in sol_dict.items():
+                                    try:
+                                        if val.is_integer or isinstance(val, (int, sp.Integer)):
+                                            candidate = int(val)
+                                            return (candidate, 0.8)
+                                    except (ValueError, TypeError, AttributeError):
+                                        pass
+                except Exception as e:
+                    logger.debug(f"System solving error: {e}")
+            
+            # Fallback: Try to solve the first equation
             if len(equations) >= 1:
                 eq = equations[0]
-                if '=' in eq:
-                    solutions = SymPySolver.solve_equation(eq)
-                    if solutions:
-                        for sol in solutions:
-                            try:
-                                candidate = int(sol)
-                            except (ValueError, TypeError):
-                                continue
-                            if SymPySolver.verify_solution(eq, 'x', candidate):
-                                return (candidate, 0)
+                if '=' not in eq:
+                    return None
+                
+                # Try with each variable as the unknown
+                for var_name in var_list[:3]:  # Try first 3 variables
+                    try:
+                        solutions = SymPySolver.solve_equation(eq, var_name)
+                        if solutions:
+                            for sol in solutions:
+                                try:
+                                    candidate = int(sol)
+                                except (ValueError, TypeError):
+                                    continue
+                                # Verify solution
+                                if SymPySolver.verify_solution(eq, var_name, candidate):
+                                    return (candidate, 0.7)
+                    except Exception:
+                        pass
+            
         except Exception as e:
             logger.debug(f"Equation solving error: {e}")
         
@@ -711,108 +774,8 @@ class ConstraintSolver:
         return [int(v % modulo) for v in values if v is not None]
 
 
-class EquationExtractor:
-    """Extract and normalize equations from text."""
-    
-    @staticmethod
-    def extract_equations(text: str) -> List[str]:
-        """Extract equations from text."""
-        if not text:
-            return []
-        
-        # Find equations (patterns like "x + y = 5" or "2x^2 - 3x + 1 = 0")
-        equations = []
-        
-        # Split by newline and find equation-like patterns
-        lines = text.split('\n')
-        for line in lines:
-            line = line.strip()
-            if '=' in line and any(c in line for c in 'xy'):
-                equations.append(line)
-        
-        return equations
-    
-    @staticmethod
-    def normalize_expression(expr_str: str) -> str:
-        """Normalize expression to SymPy-compatible format."""
-        if not SYMPY_AVAILABLE:
-            return expr_str
-        
-        try:
-            # Replace ^ with **
-            expr_str = expr_str.replace('^', '**')
-            # Replace common patterns
-            expr_str = re.sub(r'(\d)([a-z])', r'\1*\2', expr_str)  # 2x -> 2*x
-            return expr_str
-        except Exception as e:
-            logger.debug(f"Normalization error: {e}")
-            return expr_str
+# ============================================================================
+# END OF FILE - Duplicate class definitions removed
+# ============================================================================
 
-
-class DiophantineSolver:
-    """Solve Diophantine equations."""
-    
-    @staticmethod
-    def linear_diophantine(a: int, b: int, c: int) -> Optional[Tuple[int, int]]:
-        """
-        Solve ax + by = c (linear Diophantine equation).
-        Returns one particular solution (x0, y0).
-        """
-        if not SYMPY_AVAILABLE:
-            return None
-        
-        try:
-            from sympy import gcd
-            g = gcd(a, b)
-            
-            if c % g != 0:
-                return None  # No solution
-            
-            # Use extended GCD to find solution
-            x, y = sp.symbols('x y')
-            eq = sp.Eq(a*x + b*y, c)
-            solutions = sp.solve(eq, [x, y])
-            
-            if solutions:
-                if isinstance(solutions, list):
-                    sol = solutions[0]
-                    if isinstance(sol, tuple):
-                        return (int(sol[0]) if isinstance(sol[0], (int, sp.Integer)) else None,
-                                int(sol[1]) if isinstance(sol[1], (int, sp.Integer)) else None)
-                else:
-                    return None
-        except Exception as e:
-            logger.debug(f"Diophantine solver error: {e}")
-        
-        return None
-    
-    @staticmethod
-    def modular_congruence(a: int, b: int, m: int) -> Optional[int]:
-        """Solve ax ≡ b (mod m)."""
-        if not SYMPY_AVAILABLE:
-            return None
-        
-        try:
-            from sympy.ntheory import mod_inverse
-            
-            g = gcd(a, m)
-            if b % g != 0:
-                return None  # No solution
-            
-            # Reduce
-            a = a // g
-            b = b // g
-            m = m // g
-            
-            # Find modular inverse of a mod m
-            a_inv = mod_inverse(a, m)
-            x = (a_inv * b) % m
-            return x
-        except Exception as e:
-            logger.debug(f"Modular congruence error: {e}")
-        
-        return None
-
-
-# Old dynamic method attachment (removed - methods now part of SymPySolver class)
 

@@ -7,7 +7,7 @@ Converts LLM-generated formulas into deterministic computations.
 
 import logging
 import re
-from typing import Optional, List, Tuple, Any, Union
+from typing import Optional, List, Tuple, Any, Union, Dict
 
 try:
     import sympy as sp
@@ -37,6 +37,37 @@ logger = logging.getLogger(__name__)
 
 class SymPySolver:
     """Symbolic solver using SymPy for exact computations."""
+
+    @staticmethod
+    def verify_solution(equation_str: str, variable: str, solution: int) -> bool:
+        """Plug solution back into equation to verify."""
+        if not SYMPY_AVAILABLE:
+            return True
+        try:
+            var = sp.Symbol(variable)
+            if '=' in equation_str:
+                lhs, rhs = equation_str.split('=')
+                lhs_val = sp.sympify(lhs).subs(var, solution)
+                rhs_val = sp.sympify(rhs).subs(var, solution)
+                return sp.simplify(lhs_val - rhs_val) == 0
+            expr_val = sp.sympify(equation_str).subs(var, solution)
+            return sp.simplify(expr_val) == 0
+        except Exception:
+            return True
+
+    @staticmethod
+    def solve_crt(remainders: List[int], moduli: List[int]) -> Optional[int]:
+        """Solve system of congruences using CRT."""
+        if not SYMPY_AVAILABLE:
+            return None
+        try:
+            from sympy.ntheory.modular import crt
+            result = crt(moduli, remainders)
+            if result and result[0] is not None:
+                return int(result[0])
+        except Exception:
+            return None
+        return None
     
     @staticmethod
     def solve_equation(equation_str: str, variable_str: str = 'x') -> Optional[List[Any]]:
@@ -159,6 +190,15 @@ class SymPySolver:
             return None
         
         try:
+            # Detect multiple congruences for CRT: x ≡ a (mod m)
+            congruences = re.findall(r'([a-zA-Z])\s*[≡=]\s*(\d+)\s*\(\s*mod\s*(\d+)\s*\)', problem_text)
+            if len(congruences) >= 2:
+                remainders = [int(c[1]) for c in congruences]
+                moduli = [int(c[2]) for c in congruences]
+                crt_result = SymPySolver.solve_crt(remainders, moduli)
+                if crt_result is not None:
+                    return (crt_result, 0)
+
             # Extract modulo value - look for "mod X", "modulo X", or "divided by X"
             mod_match = re.search(r'(?:mod|modulo)\s*(\d+)', problem_text.lower())
             if not mod_match:
@@ -217,12 +257,14 @@ class SymPySolver:
                 eq = equations[0]
                 if '=' in eq:
                     solutions = SymPySolver.solve_equation(eq)
-                    if solutions and len(solutions) > 0:
-                        sol = solutions[0]
-                        try:
-                            return (int(sol), 0)
-                        except (ValueError, TypeError):
-                            pass
+                    if solutions:
+                        for sol in solutions:
+                            try:
+                                candidate = int(sol)
+                            except (ValueError, TypeError):
+                                continue
+                            if SymPySolver.verify_solution(eq, 'x', candidate):
+                                return (candidate, 0)
         except Exception as e:
             logger.debug(f"Equation solving error: {e}")
         
@@ -344,6 +386,20 @@ class NumberTheorySolver:
             return int(mod_inverse(a, m))
         except Exception:
             return None
+
+    @staticmethod
+    def euler_totient(n: int) -> Optional[int]:
+        """Compute Euler's totient function φ(n)."""
+        if not SYMPY_AVAILABLE:
+            return None
+        try:
+            return int(sp.totient(n))
+        except Exception:
+            try:
+                from sympy.ntheory import totient
+                return int(totient(n))
+            except Exception:
+                return None
 
 
 class CombinatoricsSolver:
@@ -535,6 +591,41 @@ class DiophantineSolver:
         # Legendre symbol using Euler's criterion
         legendre = pow(a % p, (p - 1) // 2, p)
         return legendre == 1
+
+    @staticmethod
+    def count_diophantine_solutions(equation_str: str, bounds: Dict[str, Tuple[int, int]]) -> Optional[int]:
+        """Count integer solutions within bounds for a diophantine equation."""
+        if not SYMPY_AVAILABLE:
+            return None
+        try:
+            from sympy import diophantine
+            symbols_in_eq = sorted(set(re.findall(r'[a-zA-Z]', equation_str)))
+            if not symbols_in_eq:
+                return None
+            vars_ = sp.symbols(' '.join(symbols_in_eq))
+            expr = sp.sympify(equation_str.replace('=', '-(') + ')') if '=' in equation_str else sp.sympify(equation_str)
+            sols = diophantine(expr, *vars_)
+            count = 0
+            for sol in sols:
+                if not isinstance(sol, (tuple, list)):
+                    sol = (sol,)
+                ok = True
+                for var_name, value in zip(symbols_in_eq, sol):
+                    if var_name in bounds:
+                        lo, hi = bounds[var_name]
+                        try:
+                            val_int = int(value)
+                        except Exception:
+                            ok = False
+                            break
+                        if not (lo <= val_int <= hi):
+                            ok = False
+                            break
+                if ok:
+                    count += 1
+            return count
+        except Exception:
+            return None
 
 
 class EquationExtractor:

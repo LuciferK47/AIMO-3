@@ -123,6 +123,20 @@ class AnswerValidator:
         
         return True
 
+    @staticmethod
+    def check_modular_constraint(answer: int, problem_text: str) -> bool:
+        """Check remainder constraints: if modulo specified, answer must be < modulo."""
+        problem_lower = problem_text.lower()
+        match = re.search(r'(?:mod|modulo|divided by)\s+(\d+)', problem_lower)
+        if match:
+            try:
+                modulus = int(match.group(1))
+                if 'remainder' in problem_lower and answer >= modulus:
+                    return False
+            except Exception:
+                pass
+        return True
+
 
 # ============================================================================
 # DETERMINISTIC VERIFIER
@@ -559,6 +573,13 @@ class SelfVerificationLoop:
         else:
             scores.append(0.3)
         weights.append(0.1)
+
+        # Modular constraint check
+        if AnswerValidator.check_modular_constraint(answer, problem_text):
+            scores.append(0.9)
+        else:
+            scores.append(0.2)
+        weights.append(0.08)
         
         # Modular arithmetic verification
         mod_score = AdvancedVerification.verify_with_modular_arithmetic(answer, problem_text)

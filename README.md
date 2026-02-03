@@ -6,8 +6,8 @@
 
 This is a complete, battle-tested pipeline for AIMO-3 code competition. It implements:
 
-- **Multi-strategy reasoning** (Chain-of-Thought, Program Synthesis, Domain-Specific Prompts)
-- **Ensemble generation** (4-5 independent attempts per problem)
+- **SymPy-first solving** (deterministic computation)
+- **LLM translation only** (formalization, equations, case enumeration)
 - **Rigorous verification** (constraint checking, symbolic validation)
 - **Scoring optimization** (tailored for the 0/0.5/1.0 point scheme)
 - **Production hardening** (timeouts, memory management, fallbacks)
@@ -65,15 +65,11 @@ Problem Input
     ↓
 [Domain Classification]
     ↓
-[Strategy Selection]
-    ↓
-[Multi-Attempt Generation] (4-5 independent attempts)
-    ├→ Attempt 1: CoT (T=0.3)
-    ├→ Attempt 2: Specialized (T=0.6)
-    ├→ Attempt 3: Program (T=0.9)
-    └→ Attempt 4: Scratchpad (T=1.0)
-    ↓
-[Candidate Extraction]
+[Candidate Generation]
+    ├→ SymPy direct solving (primary)
+    ├→ LLM translate → SymPy solve
+    ├→ LLM enumerate cases → SymPy compute
+    └→ LLM formalize → SymPy evaluate
     ↓
 [Verification & Ranking]
     ↓
@@ -87,12 +83,12 @@ Return (answer1, answer2)
 | Module | Purpose |
 |--------|---------|
 | `submission.py` | **Entry point** - API interface, problem routing |
-| `solver.py` | **Core orchestration** - AdaptiveSolver class |
-| `reasoning.py` | **Prompt strategies** - CoT, Program Synthesis, Domain-specific |
-| `verification.py` | **Validation** - Constraint checking, confidence scoring |
+| `solver.py` | **Core orchestration** - Strategy arbiter and arbitration |
+| `sympy_solver.py` | **Symbolic solving** - SymPy integration and solvers |
+| `validation.py` | **Validation** - Constraint checks, confidence scoring |
 | `parsing.py` | **Input processing** - LaTeX normalization, domain classification |
-| `models.py` | **LLM inference** - Model loading and generation |
-| `utils.py` | **Utilities** - Answer extraction, consensus, timeouts |
+| `config.py` | **Configuration** - Models, limits, feature flags |
+| `utils.py` | **Utilities** - Answer extraction, timeouts, LLM calls |
 
 ---
 

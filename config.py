@@ -3,6 +3,8 @@ Centralized configuration for AIMO-3 solver.
 Consolidates: models.py, configuration.py, prompt_lib.py, constants
 """
 
+import os
+
 # ============================================================================
 # MODEL CONFIGURATION
 # ============================================================================
@@ -14,6 +16,21 @@ ALTERNATIVE_MODELS = {
     "deepseek_distill": "DeepSeek-R1-Distill-14B",
     "openai_gpt4": "gpt-4-turbo",
 }
+
+# ============================================================================
+# LLM CONFIGURATION (REQUIRED)
+# ============================================================================
+
+# Supported values: "openai", "anthropic"
+LLM_CLIENT = os.environ.get("LLM_CLIENT", "openai")
+# Default model for the selected client
+LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4-turbo")
+# API key sourced from environment
+LLM_API_KEY = (
+    os.environ.get("OPENAI_API_KEY")
+    or os.environ.get("ANTHROPIC_API_KEY")
+    or os.environ.get("LLM_API_KEY")
+)
 
 # ============================================================================
 # HYPERPARAMETERS
@@ -48,12 +65,6 @@ EASY_MULTIPLIER = 0.5
 HARD_MULTIPLIER = 2.0
 CONSENSUS_THRESHOLD = 0.8
 MAX_BUDGET_FRACTION = 0.4
-
-# MCTS Configuration
-MCTS_NUM_SIMULATIONS = 50
-MCTS_MAX_DEPTH = 10
-MCTS_EXPLORATION_CONST = 1.41
-MCTS_NUM_EXPANSIONS = 3
 
 # Ensemble Configuration
 PYTHON_EXECUTION_WEIGHT = 3.0
@@ -239,7 +250,6 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 # Feature flags
 USE_PRM_FILTERING = True
 USE_DYNAMIC_ALLOCATION = True
-USE_MCTS_FOR_HARD = True
 USE_OPTIMAL_WEIGHTING = True
 USE_CACHING = True
 

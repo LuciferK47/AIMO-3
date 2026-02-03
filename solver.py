@@ -35,8 +35,7 @@ from config import *
 from parsing import ProblemParser
 from sympy_solver import SymPySolver, EquationExtractor, DiophantineSolver
 from validation import AnswerValidator, SelfVerificationLoop
-from utils import extract_integers, preprocess_problem_text, query_llm
-from cache import get_intermediate_cache
+from utils import preprocess_problem_text, query_llm, query_llm_json, ensure_determinism
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +163,16 @@ class CandidateGenerator:
             try:
                 sym_candidates = self._try_symbolic(problem_text, classification)
                 candidates.extend(sym_candidates)
+                unique_sym = {c[0] for c in sym_candidates if isinstance(c, tuple) and c[0] != 0}
+                if len(unique_sym) == 1 and len(sym_candidates) >= 1:
+                    logger.info("SymPy solved confidently - skipping LLM")
+                    seen = set()
+                    unique_candidates = []
+                    for c in candidates:
+                        if c not in seen and c != (0, 0):
+                            seen.add(c)
+                            unique_candidates.append(c)
+                    return unique_candidates[:MAX_CANDIDATES_PER_PROBLEM]
             except Exception as e:
                 logger.debug(f"Direct symbolic failed: {e}")
         
@@ -196,7 +205,7 @@ class CandidateGenerator:
                 seen.add(c)
                 unique_candidates.append(c)
         
-        return unique_candidates[:5]
+        return unique_candidates[:MAX_CANDIDATES_PER_PROBLEM]
     
     def _try_symbolic(self, problem_text: str, classification: Dict[str, Any]) -> List[Tuple[int, int]]:
         """Try pure symbolic solving."""
@@ -242,15 +251,13 @@ class CandidateGenerator:
         candidates = []
         
         try:
-            # STEP 1: LLM AS TRANSLATOR (NOT SOLVER)
-            # Strict prompt: ONLY equations, NO solving, NO answers
             translation_prompt = f"""
 You are a mathematical translator, NOT a solver.
 
 Task: Convert this problem into formal mathematical equations ONLY.
 
 Rules:
-- Output ONLY equations (e.g., "x + y = 10", "2*x - 3*y = 5")
+- Output ONLY JSON: {{"equations": ["x + y = 10", "2*x - 3*y = 5"]}}
 - Use standard variables: x, y, z, n, k, a, b
 - Do NOT solve
 - Do NOT compute answers
@@ -258,20 +265,20 @@ Rules:
 
 Problem:
 {problem_text}
-
-Equations (one per line):
 """
-            equations_text = query_llm(translation_prompt, max_tokens=250, temperature=0.1)
-            
-            if not equations_text:
-                return candidates
-            
-            # STEP 2: EXTRACT & NORMALIZE
-            extractor = EquationExtractor()
-            equations = extractor.extract_equations(equations_text)
-            
+            response = query_llm_json(translation_prompt, max_tokens=250, temperature=0.1)
+            equations = []
+            if response and isinstance(response.get("equations"), list):
+                equations = [str(e).strip() for e in response["equations"] if str(e).strip()]
+
             if not equations:
-                return candidates
+                equations_text = query_llm(translation_prompt, max_tokens=250, temperature=0.1)
+                if not equations_text:
+                    return candidates
+                extractor = EquationExtractor()
+                equations = extractor.extract_equations(equations_text)
+                if not equations:
+                    return candidates
             
             # STEP 3: SYMPY SOLVES (PRIMARY SOLVER)
             result = SymPySolver.solve_from_equations(equations, problem_text)
@@ -302,27 +309,18 @@ You are a case enumerator, NOT a solver.
 Task: List ALL cases or values that need to be checked.
 
 Rules:
-- Output a Python list: [val1, val2, val3, ...]
+- Output ONLY JSON: {{"cases": [val1, val2, val3, ...]}}
 - Do NOT compute final answer
 - Just enumerate the search space
 
 Problem:
 {problem_text}
-
-Cases to check:
 """
-            response = query_llm(enumeration_prompt, max_tokens=200, temperature=0.2)
-            
-            if response and '[' in response and ']' in response:
-                import ast
-                try:
-                    cases = ast.literal_eval(response[response.index('['):response.rindex(']')+1])
-                    if isinstance(cases, list):
-                        for case in cases[:10]:  # Limit to 10 cases
-                            if isinstance(case, int) and 0 <= case <= 99999:
-                                candidates.append((case, 0))
-                except (ValueError, SyntaxError):
-                    pass
+            response = query_llm_json(enumeration_prompt, max_tokens=200, temperature=0.2)
+            if response and isinstance(response.get("cases"), list):
+                for case in response["cases"][:10]:
+                    if isinstance(case, int) and 0 <= case <= 99999:
+                        candidates.append((case, 0))
         
         except Exception as e:
             logger.debug(f"Case enumeration error: {e}")
@@ -347,21 +345,25 @@ You are a mathematical formalizer, NOT a calculator.
 Task: Convert this problem into a SINGLE mathematical expression.
 
 Rules:
-- Output ONLY the expression (e.g., "factorial(5)/factorial(3)", "2**10 % 7")
+- Output ONLY JSON: {{"expression": "2**10 % 7"}}
 - Use Python syntax: **, //, %, factorial(n)
 - Do NOT compute the answer
 - Do NOT explain
 
 Problem:
 {problem_text}
-
-Expression:
 """
-            response = query_llm(formalization_prompt, max_tokens=150, temperature=0.1)
-            
-            if response:
+            response = query_llm_json(formalization_prompt, max_tokens=150, temperature=0.1)
+            expression = None
+            if response and isinstance(response.get("expression"), str):
+                expression = response["expression"].strip()
+            if not expression:
+                raw = query_llm(formalization_prompt, max_tokens=150, temperature=0.1)
+                expression = raw.strip() if raw else None
+
+            if expression:
                 try:
-                    result = SymPySolver.evaluate_expression(response.strip())
+                    result = SymPySolver.evaluate_expression(expression)
                     if result is not None:
                         answer = int(result)
                         if 0 <= answer <= 99999:
@@ -372,47 +374,6 @@ Expression:
         
         except Exception as e:
             logger.debug(f"Formalization error: {e}")
-        
-        return candidates
-        
-        try:
-            if mode == "direct":
-                # Structured, deterministic
-                prompt = f"""
-Solve this problem step by step.
-Output ONLY the final integer answer.
-Format: ANSWER = <integer>
-
-Problem: {problem_text}
-
-ANSWER = """
-                temperature = 0.2
-            else:  # creative
-                # More flexible, explores alternatives
-                prompt = f"""
-Solve this problem using any approach that works.
-Show key steps only. End with final answer.
-Format: ANSWER = <integer>
-
-Problem: {problem_text}
-
-ANSWER = """
-                temperature = 0.5
-            
-            response = query_llm(prompt, max_tokens=300, temperature=temperature)
-            
-            if response:
-                # Extract integer from response
-                integers = extract_integers(response)
-                if integers:
-                    # Take first integer found
-                    answer = integers[0]
-                    # Clamp to valid range
-                    if 0 <= answer <= 99999:
-                        candidates.append((answer, 0))  # Single answer with secondary=0
-        
-        except Exception as e:
-            logger.debug(f"LLM reasoning error: {e}")
         
         return candidates
 
@@ -433,16 +394,51 @@ class AnswerArbitrator:
         """
         if not candidates:
             return (0, 0)
-        
-        # Filter valid candidates (range check)
-        valid_candidates = [c for c in candidates if c != (0, 0)]
-        
-        if valid_candidates:
-            # Return first (best generated) candidate
-            return valid_candidates[0]
-        
-        return (0, 0)
 
+        # Extract primary answers
+        primary_answers = [c[0] for c in candidates if isinstance(c, tuple) and len(c) >= 1]
+        primary_answers = [a for a in primary_answers if isinstance(a, int) and a != 0]
+
+        if not primary_answers:
+            return (0, 0)
+
+        # Build problem analysis + equations for verification (cached)
+        from cache import get_intermediate_cache
+        intermediate_cache = get_intermediate_cache()
+        problem_analysis = intermediate_cache.get_problem_analysis(problem_text)
+        if not problem_analysis:
+            problem_analysis = ProblemParser.extract_problem_subtype(problem_text)
+            intermediate_cache.put_problem_analysis(problem_text, problem_analysis)
+
+        equations = intermediate_cache.get_equations(problem_text)
+        if equations is None:
+            try:
+                equations = EquationExtractor().extract_equations(problem_text)
+            except Exception:
+                equations = []
+            intermediate_cache.put_equations(problem_text, equations)
+
+        scored_candidates = []
+        for ans in set(primary_answers):
+            if not AnswerValidator.check_range(ans):
+                continue
+            confidence = SelfVerificationLoop.score_candidate_answer(
+                ans, problem_text, problem_analysis, equations
+            )
+            scored_candidates.append((ans, confidence))
+
+        if not scored_candidates:
+            return (0, 0)
+
+        # Sort by confidence and pick top two unique answers
+        scored_candidates.sort(key=lambda x: x[1], reverse=True)
+        ordered_answers = [ans for ans, _ in scored_candidates]
+
+        if len(ordered_answers) == 1:
+            return (ordered_answers[0], ordered_answers[0])
+
+        return (ordered_answers[0], ordered_answers[1])
+ 
 
 class StrategyArbiter:
     """Master orchestrator implementing the target pipeline."""
@@ -468,18 +464,20 @@ class StrategyArbiter:
         4. Answer Arbitration
         """
         self.start_time = time.time()
+        if USE_FIXED_SEED:
+            ensure_determinism(RANDOM_SEED)
         
         try:
             # STAGE 1: PARSE & CLASSIFY
             problem_text = preprocess_problem_text(problem_text)
-            logger.info(f"Parsing problem...")
+            logger.info("Parsing problem...")
             
             classification = ProblemClassifier.classify(problem_text)
             logger.info(f"Classification: {classification['problem_type']}")
             logger.info(f"Allows symbolic: {classification['allows_symbolic']}")
             
             # STAGE 2: MULTI-CANDIDATE GENERATION
-            logger.info(f"Generating candidates...")
+            logger.info("Generating candidates...")
             remaining_time = self.timeout - (time.time() - self.start_time)
             generator = CandidateGenerator(timeout_remaining=min(remaining_time, 15.0))
             candidates = generator.generate(problem_text, classification)
@@ -487,11 +485,11 @@ class StrategyArbiter:
             logger.info(f"Generated {len(candidates)} candidates: {candidates}")
             
             if not candidates:
-                logger.warning(f"No candidates generated, returning (0, 0)")
+                logger.warning("No candidates generated, returning (0, 0)")
                 return (0, 0)
             
             # STAGE 3 & 4: VERIFY & ARBITRATE
-            logger.info(f"Arbitrating candidates...")
+            logger.info("Arbitrating candidates...")
             arbitrator = AnswerArbitrator()
             final_answer = arbitrator.arbitrate(candidates, problem_text)
             

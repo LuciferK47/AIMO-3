@@ -3,8 +3,10 @@ Shared utilities for AIMO-3 pipeline.
 """
 
 import re
+import json
 import logging
-import signal
+import threading
+import _thread
 from typing import List, Set, Optional, Tuple, Any, Dict
 from collections import Counter
 import functools
@@ -36,8 +38,18 @@ def preprocess_problem_text(latex_text: str) -> str:
     return processed_text
 
 
-def timeout_handler(signum, frame):
-    raise TimeoutError("Operation exceeded time limit")
+def ensure_determinism(seed: int = 42) -> None:
+    """Ensure deterministic behavior across common RNGs."""
+    try:
+        import random
+        random.seed(seed)
+    except Exception:
+        pass
+    try:
+        import numpy as np
+        np.random.seed(seed)
+    except Exception:
+        pass
 
 
 @contextmanager
@@ -51,17 +63,31 @@ def time_limit(seconds: float):
     
     Raises TimeoutError if time limit exceeded.
     """
-    def signal_handler(signum, frame):
-        raise TimeoutError(f"Operation exceeded {seconds}s time limit")
-    
-    old_handler = signal.signal(signal.SIGALRM, signal_handler)
-    signal.alarm(int(seconds) + 1)
-    
+    if seconds is None or seconds <= 0:
+        yield
+        return
+
+    timed_out = {"flag": False}
+
+    def interrupt_main():
+        timed_out["flag"] = True
+        try:
+            _thread.interrupt_main()
+        except Exception:
+            pass
+
+    timer = threading.Timer(seconds, interrupt_main)
+    timer.daemon = True
+    timer.start()
+
     try:
         yield
+    except KeyboardInterrupt:
+        if timed_out["flag"]:
+            raise TimeoutError(f"Operation exceeded {seconds}s time limit")
+        raise
     finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
+        timer.cancel()
 
 
 
@@ -231,6 +257,10 @@ def query_llm(prompt: str, max_tokens: int = 500, temperature: float = 0.2) -> O
         # Import LLM client (uses config.py settings)
         from config import LLM_CLIENT, LLM_MODEL, LLM_API_KEY
         
+        if not LLM_API_KEY:
+            logger.warning("LLM_API_KEY is not set; skipping LLM call")
+            return None
+
         if LLM_CLIENT == "openai":
             try:
                 import openai
@@ -239,7 +269,7 @@ def query_llm(prompt: str, max_tokens: int = 500, temperature: float = 0.2) -> O
                 response = openai.ChatCompletion.create(
                     model=LLM_MODEL,
                     messages=[
-                        {"role": "system", "content": "You are a math problem solver. Output only equations or final answers. No explanation."},
+                        {"role": "system", "content": "You are a math formalizer. Output only equations or expressions. No explanation."},
                         {"role": "user", "content": prompt}
                     ],
                     max_tokens=max_tokens,
@@ -278,4 +308,24 @@ def query_llm(prompt: str, max_tokens: int = 500, temperature: float = 0.2) -> O
     except Exception as e:
         logger.debug(f"LLM query error: {e}")
         return None
+
+
+def parse_json_response(text: str) -> Optional[Dict[str, Any]]:
+    """Parse the first valid JSON object from text."""
+    if not text:
+        return None
+    try:
+        start = text.find('{')
+        end = text.rfind('}')
+        if start == -1 or end == -1 or end <= start:
+            return None
+        return json.loads(text[start:end + 1])
+    except Exception:
+        return None
+
+
+def query_llm_json(prompt: str, max_tokens: int = 300, temperature: float = 0.1) -> Optional[Dict[str, Any]]:
+    """Query LLM and parse a JSON response."""
+    response = query_llm(prompt, max_tokens=max_tokens, temperature=temperature)
+    return parse_json_response(response)
 

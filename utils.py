@@ -129,7 +129,9 @@ def extract_integers(text: str) -> List[int]:
             unique_answers.append(ans)
             seen.add(ans)
     
-    return unique_answers if unique_answers else [0]
+    # Return empty list if no valid integers found (don't default to 0)
+    # 0 is a valid answer and shouldn't be forced as fallback
+    return unique_answers
 
 
 def clamp_to_range(value: Any, min_val: int = 0, max_val: int = 99999) -> int:
@@ -245,6 +247,11 @@ def query_llm(prompt: str, max_tokens: int = 500, temperature: float = 0.2) -> O
     - No prose
     - Explicit integer answers
     
+    Supports:
+    - OpenAI API (when LLM_CLIENT="openai")
+    - Anthropic API (when LLM_CLIENT="anthropic")
+    - HuggingFace local models (when LLM_CLIENT="huggingface") for Kaggle offline mode
+    
     Args:
         prompt: Disciplined prompt (should enforce equation/answer format)
         max_tokens: Maximum response length
@@ -256,6 +263,56 @@ def query_llm(prompt: str, max_tokens: int = 500, temperature: float = 0.2) -> O
     try:
         # Import LLM client (uses config.py settings)
         from config import LLM_CLIENT, LLM_MODEL, LLM_API_KEY
+        
+        if LLM_CLIENT == "huggingface":
+            # Local model support for Kaggle offline mode
+            try:
+                from transformers import AutoModelForCausalLM, AutoTokenizer
+                import torch
+                
+                # Cache model to avoid reloading
+                if not hasattr(query_llm, '_hf_model'):
+                    logger.info(f"Loading HuggingFace model: {LLM_MODEL}")
+                    query_llm._hf_tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL)
+                    query_llm._hf_model = AutoModelForCausalLM.from_pretrained(
+                        LLM_MODEL,
+                        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                        device_map="auto" if torch.cuda.is_available() else None,
+                    )
+                    logger.info("✓ HuggingFace model loaded")
+                
+                tokenizer = query_llm._hf_tokenizer
+                model = query_llm._hf_model
+                
+                # Format prompt for math model
+                formatted_prompt = f"<|im_start|>system\nYou are a math formalizer. Output only equations or expressions. No explanation.<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+                
+                inputs = tokenizer(formatted_prompt, return_tensors="pt")
+                if torch.cuda.is_available():
+                    inputs = {k: v.cuda() for k, v in inputs.items()}
+                
+                # Generate with timeout protection
+                with torch.no_grad():
+                    outputs = model.generate(
+                        **inputs,
+                        max_new_tokens=max_tokens,
+                        temperature=temperature,
+                        top_p=0.95,
+                        do_sample=temperature > 0,
+                    )
+                
+                response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                # Extract only the assistant response
+                if "<|im_start|>assistant" in response:
+                    response = response.split("<|im_start|>assistant")[-1].strip()
+                
+                return response
+            except ImportError:
+                logger.warning("HuggingFace transformers not available, falling back to SymPy-only mode")
+                return None
+            except Exception as e:
+                logger.debug(f"HuggingFace query failed: {e}")
+                return None
         
         if not LLM_API_KEY:
             logger.warning("LLM_API_KEY is not set; skipping LLM call")

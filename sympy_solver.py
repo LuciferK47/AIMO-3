@@ -8,6 +8,7 @@ Converts LLM-generated formulas into deterministic computations.
 import logging
 import re
 from typing import Optional, List, Tuple, Any, Union, Dict
+from utils import time_limit
 
 try:
     import sympy as sp
@@ -33,6 +34,34 @@ except Exception as e:
     logging.debug(f"SymPy import failed: {type(e).__name__}: {e}")
 
 logger = logging.getLogger(__name__)
+
+
+def solve_with_timeout(equation_expr: Any, symbols_list: List[Any], 
+                       timeout: float = 2.0) -> Optional[List[Any]]:
+    """
+    Solve SymPy equation with timeout protection.
+    
+    Args:
+        equation_expr: SymPy equation or expression
+        symbols_list: List of SymPy symbols to solve for
+        timeout: Maximum execution time in seconds
+        
+    Returns:
+        Solutions or None if timeout/error occurs
+    """
+    if not SYMPY_AVAILABLE:
+        return None
+    
+    try:
+        with time_limit(timeout):
+            return sp.solve(equation_expr, symbols_list)
+    except TimeoutError:
+        logger.warning(f"SymPy solve timeout after {timeout}s")
+        return None
+    except Exception as e:
+        logger.debug(f"SymPy solve error: {e}")
+        return None
+
 
 
 class SymPySolver:
@@ -72,14 +101,14 @@ class SymPySolver:
     @staticmethod
     def solve_equation(equation_str: str, variable_str: str = 'x') -> Optional[List[Any]]:
         """
-        Solve a single equation for a variable.
+        Solve a single equation for a variable with timeout protection.
         
         Args:
             equation_str: String like "x**2 - 4" or "x**2 - 4 = 0"
             variable_str: Variable name
             
         Returns:
-            List of solutions, or None if solving fails
+            List of solutions, or None if solving fails/times out
         """
         if not SYMPY_AVAILABLE:
             return None
@@ -94,7 +123,8 @@ class SymPySolver:
             else:
                 eq = sp.sympify(equation_str)
             
-            solutions = sp.solve(eq, var)
+            # Use timeout wrapper to prevent hangs
+            solutions = solve_with_timeout(eq, [var], timeout=2.0)
             logger.debug(f"Equation solutions: {solutions}")
             return solutions
         except Exception as e:
@@ -185,24 +215,30 @@ class SymPySolver:
     
     @staticmethod
     def solve_modular_equation(problem_text: str) -> Optional[Tuple[int, int]]:
-        """Solve modular arithmetic problems like '7^1000 mod 13' or 'remainder when divided by'."""
+        """
+        Solve modular arithmetic problems including:
+        - Simple powers: 7^1000 mod 13
+        - CRT systems: x ≡ a (mod m), x ≡ b (mod n)
+        - Fermat's Little Theorem: a^(p-1) ≡ 1 (mod p) for prime p
+        - Euler's theorem: a^φ(n) ≡ 1 (mod n) for gcd(a,n)=1
+        - Linear congruences: ax ≡ b (mod m)
+        """
         if not SYMPY_AVAILABLE:
             return None
         
         try:
-            # Detect multiple congruences for CRT: x ≡ a (mod m)
+            # Try CRT system first (multiple congruences)
             congruences = re.findall(r'([a-zA-Z])\s*[≡=]\s*(\d+)\s*\(\s*mod\s*(\d+)\s*\)', problem_text)
             if len(congruences) >= 2:
                 remainders = [int(c[1]) for c in congruences]
                 moduli = [int(c[2]) for c in congruences]
                 crt_result = SymPySolver.solve_crt(remainders, moduli)
-                if crt_result is not None:
-                    return (crt_result, 0)
-
-            # Extract modulo value - look for "mod X", "modulo X", or "divided by X"
+                if crt_result is not None and 0 <= crt_result <= 99999:
+                    return (crt_result, 0.8)
+            
+            # Extract modulo value
             mod_match = re.search(r'(?:mod|modulo)\s*(\d+)', problem_text.lower())
             if not mod_match:
-                # Try "divided by" pattern
                 mod_match = re.search(r'divided\s+by\s+(\d+)', problem_text.lower())
             
             if not mod_match:
@@ -210,39 +246,111 @@ class SymPySolver:
             
             modulo = int(mod_match.group(1))
             
-            # Extract base and exponent for power mod
+            # Pattern 1: Power modulo (a^b mod m)
             power_match = re.search(r'(\d+)\s*\^\s*(\d+)', problem_text)
             if power_match:
                 base = int(power_match.group(1))
                 exp = int(power_match.group(2))
-                result = pow(base, exp, modulo)
-                return (result, 0)
+                
+                # Optimize using Fermat/Euler
+                # If modulo is prime and gcd(base, modulo) = 1: a^(p-1) ≡ 1 (mod p)
+                if NumberTheorySolver.isprime(modulo):
+                    # Use Fermat's Little Theorem: a^(p-1) ≡ 1 (mod p)
+                    reduced_exp = exp % (modulo - 1)
+                    result = pow(base, reduced_exp, modulo)
+                else:
+                    # Use Euler's theorem: a^φ(n) ≡ 1 (mod n) if gcd(a,n)=1
+                    phi_n = NumberTheorySolver.euler_totient(modulo)
+                    reduced_exp = exp % phi_n
+                    result = pow(base, reduced_exp, modulo)
+                
+                if 0 <= result <= 99999:
+                    return (result, 0.85)
+            
+            # Pattern 2: Linear congruence (ax ≡ b (mod m))
+            linear_match = re.search(r'(\d+)\s*\*?\s*[a-z]\s*[≡=]\s*(\d+)\s*\(\s*mod\s*(\d+)\s*\)', problem_text)
+            if linear_match:
+                a = int(linear_match.group(1))
+                b = int(linear_match.group(2))
+                m = int(linear_match.group(3))
+                
+                # Use extended GCD to find inverse
+                from sympy.ntheory import mod_inverse
+                g = NumberTheorySolver.compute_gcd(a, m)
+                if b % g != 0:
+                    return None  # No solution
+                
+                a_red = a // g
+                b_red = b // g
+                m_red = m // g
+                
+                try:
+                    a_inv = mod_inverse(a_red, m_red)
+                    x = (a_inv * b_red) % m_red
+                    if 0 <= x <= 99999:
+                        return (x, 0.8)
+                except Exception:
+                    pass
             
             return None
         except Exception as e:
-            logger.debug(f"Modular solving error: {e}")
+            logger.debug(f"Enhanced modular solving error: {e}")
             return None
     
     @staticmethod
     def solve_combinatorics(problem_text: str) -> Optional[Tuple[int, int]]:
-        """Solve combinatorics problems."""
+        """
+        Solve combinatorics problems including:
+        - Factorials: n!
+        - Binomials: C(n,k) or nCk
+        - Permutations: P(n,k) or nPk
+        - Combinations with constraints
+        """
         if not SYMPY_AVAILABLE:
             return None
         
         try:
-            # This is heuristic; would need better parsing in production
-            from sympy import factorial as fact
+            from sympy import factorial as fact, binomial as binom
             
-            # Look for patterns like "n!" or factorial
+            # Pattern 1: Binomial coefficient C(n,k)
+            binom_matches = re.findall(r'C\((\d+),\s*(\d+)\)|(\d+)C(\d+)', problem_text)
+            for match in binom_matches:
+                if match[0]:  # C(n,k) format
+                    n, k = int(match[0]), int(match[1])
+                else:  # nCk format
+                    n, k = int(match[2]), int(match[3])
+                
+                if 0 <= k <= n:
+                    result = binom(n, k)
+                    if result and 0 <= result <= 99999:
+                        return (int(result), 0.8)
+            
+            # Pattern 2: Permutation P(n,k)
+            perm_matches = re.findall(r'P\((\d+),\s*(\d+)\)|(\d+)P(\d+)', problem_text)
+            for match in perm_matches:
+                if match[0]:  # P(n,k) format
+                    n, k = int(match[0]), int(match[1])
+                else:  # nPk format
+                    n, k = int(match[2]), int(match[3])
+                
+                if 0 <= k <= n:
+                    result = fact(n) // fact(n - k)
+                    if result and 0 <= result <= 99999:
+                        return (int(result), 0.8)
+            
+            # Pattern 3: Factorial n!
             if '!' in problem_text:
-                n_match = re.search(r'(\d+)\s*!', problem_text)
-                if n_match:
-                    n = int(n_match.group(1))
-                    result = fact(n)
-                    return (int(result), 0)
+                factorial_matches = re.findall(r'(\d+)\s*!', problem_text)
+                for n_str in factorial_matches:
+                    n = int(n_str)
+                    if n <= 20:  # Factorial grows quickly
+                        result = fact(n)
+                        if result and 0 <= result <= 99999:
+                            return (int(result), 0.8)
+            
         except Exception as e:
-            logger.debug(f"Combinatorics solving error: {e}")
-        
+            logger.debug(f"Enhanced combinatorics solving error: {e}")
+
         return None
     
     @staticmethod
@@ -609,15 +717,21 @@ class DiophantineSolver:
         
         try:
             from sympy import gcdex
-            gcd_ab = NumberTheorySolver.compute_gcd(abs(a), abs(b))
+            import math
+            
+            gcd_ab = math.gcd(abs(a), abs(b))
             
             if c % gcd_ab != 0:
                 return None  # No solution
             
-            x0, y0 = gcdex(a, b)
-            # Scale to c
-            scale = c // gcd_ab
-            return (x0 * scale, y0 * scale)
+            # gcdex returns (g, x, y) where g = a*x + b*y
+            # We use it to get coefficients, then scale
+            gcd_val, x0, y0 = gcdex(a, b)
+            
+            # Scale coefficients to satisfy ax + by = c
+            # Since ax0 + by0 = gcd_val, we multiply by c/gcd_val
+            scale = c // gcd_val
+            return (int(x0 * scale), int(y0 * scale))
         except Exception as e:
             logger.debug(f"Linear Diophantine solve failed: {e}")
             return None

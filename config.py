@@ -21,11 +21,13 @@ ALTERNATIVE_MODELS = {
 # LLM CONFIGURATION (REQUIRED)
 # ============================================================================
 
-# Supported values: "openai", "anthropic"
+# Supported values: "openai", "anthropic", "huggingface"
+# Use "huggingface" for Kaggle offline mode with local Qwen models
 LLM_CLIENT = os.environ.get("LLM_CLIENT", "openai")
 # Default model for the selected client
+# For huggingface: "Qwen/Qwen2.5-Math-7B-Instruct" or "Qwen/Qwen2.5-Math-14B-Instruct"
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4-turbo")
-# API key sourced from environment
+# API key sourced from environment (not needed for huggingface local models)
 LLM_API_KEY = (
     os.environ.get("OPENAI_API_KEY")
     or os.environ.get("ANTHROPIC_API_KEY")

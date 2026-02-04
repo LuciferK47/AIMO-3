@@ -33,6 +33,7 @@ from typing import List, Tuple, Optional, Dict, Any, Set
 
 from config import *
 from parsing import ProblemParser
+from utils import preprocess_problem_text, query_llm, ensure_determinism, time_limit
 from sympy_solver import SymPySolver, EquationExtractor, DiophantineSolver
 from validation import AnswerValidator, SelfVerificationLoop
 from utils import preprocess_problem_text, query_llm, query_llm_json, ensure_determinism
@@ -197,6 +198,13 @@ class CandidateGenerator:
         except Exception as e:
             logger.debug(f"Formalization failed: {e}")
         
+        # STRATEGY 5: LLM PYTHON GENERATION → SANDBOXED EXECUTION (NEW)
+        try:
+            python_candidates = self._try_python_execution(problem_text, classification)
+            candidates.extend(python_candidates)
+        except Exception as e:
+            logger.debug(f"Python execution failed: {e}")
+        
         # Remove duplicates
         seen = set()
         unique_candidates = []
@@ -207,11 +215,167 @@ class CandidateGenerator:
         
         return unique_candidates[:MAX_CANDIDATES_PER_PROBLEM]
     
+    def _try_python_execution(self, problem_text: str, classification: Dict[str, Any]) -> List[Tuple[int, int]]:
+        """
+        LLM PYTHON GENERATION → SANDBOXED EXECUTION
+        
+        LLM: "Generate Python code to solve this problem"
+        Executor: Safely execute code and extract integer result
+        
+        Useful for: enumeration, brute-force, iterative solutions
+        """
+        candidates = []
+        
+        try:
+            from safe_executor import safe_execute, extract_integer_from_code
+            
+            python_prompt = f"""
+You are a Python code generator for mathematical problem solving.
+
+Task: Write Python code to solve this problem. Output the answer in a variable called 'result'.
+
+Rules:
+- Use only basic Python (loops, arithmetic, lists)
+- Do NOT use imports or eval()
+- Assign final answer to 'result'
+- Code should complete quickly (< 5 seconds)
+
+Problem:
+{problem_text}
+
+Python code:
+"""
+            
+            code = query_llm(python_prompt, max_tokens=300, temperature=0.2)
+            if code:
+                # Try to extract answer from generated code
+                answer = extract_integer_from_code(code, timeout=3.0)
+                if answer is not None and AnswerValidator.check_range(answer):
+                    candidates.append((answer, 0.6))  # Moderate confidence for executed code
+        
+        except ImportError:
+            logger.debug("safe_executor module not available")
+        except Exception as e:
+            logger.debug(f"Python execution generation failed: {e}")
+        
+        return candidates
+    
     def _try_symbolic(self, problem_text: str, classification: Dict[str, Any]) -> List[Tuple[int, int]]:
         """Try pure symbolic solving."""
         candidates = []
         
         try:
+            # For diophantine equations
+            problem_type = classification.get('problem_type', '')
+            if problem_type == 'diophantine' or 'diophantine' in problem_text.lower():
+                from sympy_solver import DiophantineSolver
+                import math
+                # Try to extract bounds from problem text (e.g., "1 ≤ x ≤ 100" or "1 <= x <= 10")
+                bounds: Dict[str, Tuple[int, int]] = {}
+                text_lower = problem_text.lower()
+
+                # Pattern: 1 <= x <= 10
+                range_pattern = r'(\d+)\s*(?:<=|≤)\s*([a-zA-Z])\s*(?:<=|≤)\s*(\d+)'
+                for match in re.finditer(range_pattern, problem_text):
+                    lo, var, hi = match.groups()
+                    bounds[var] = (int(lo), int(hi))
+
+                # Pattern: x >= 1, x <= 10
+                ge_pattern = r'([a-zA-Z])\s*(?:>=|≥)\s*(\d+)'
+                le_pattern = r'([a-zA-Z])\s*(?:<=|≤)\s*(\d+)'
+                for match in re.finditer(ge_pattern, problem_text):
+                    var, lo = match.groups()
+                    lo = int(lo)
+                    if var in bounds:
+                        bounds[var] = (max(bounds[var][0], lo), bounds[var][1])
+                    else:
+                        bounds[var] = (lo, 99999)
+                for match in re.finditer(le_pattern, problem_text):
+                    var, hi = match.groups()
+                    hi = int(hi)
+                    if var in bounds:
+                        bounds[var] = (bounds[var][0], min(bounds[var][1], hi))
+                    else:
+                        bounds[var] = (0, hi)
+
+                # Pattern: x between 1 and 10
+                between_pattern = r'([a-zA-Z])\s*between\s*(\d+)\s*and\s*(\d+)'
+                for match in re.finditer(between_pattern, text_lower):
+                    var, lo, hi = match.groups()
+                    bounds[var] = (int(lo), int(hi))
+                
+                # Try linear diophantine pattern: ax + by = c
+                linear_pattern = r'(\d+)\s*([a-zA-Z])\s*\+\s*(\d+)\s*([a-zA-Z])\s*=\s*(\d+)'
+                linear_match = re.search(linear_pattern, problem_text)
+                if linear_match:
+                    a, var1, b, var2, c = linear_match.groups()
+                    a_int, b_int, c_int = int(a), int(b), int(c)
+                    solution = DiophantineSolver.linear_diophantine(a_int, b_int, c_int)
+                    if solution:
+                        x0, y0 = solution
+                        g = math.gcd(a_int, b_int)
+                        dx = b_int // g
+                        dy = -a_int // g
+
+                        # Implicit bounds for positivity
+                        if 'positive integer' in text_lower or 'positive integers' in text_lower:
+                            bounds.setdefault(var1, (1, 99999))
+                            bounds.setdefault(var2, (1, 99999))
+                        elif 'nonnegative integer' in text_lower or 'non-negative integer' in text_lower:
+                            bounds.setdefault(var1, (0, 99999))
+                            bounds.setdefault(var2, (0, 99999))
+
+                        # Default bounds to keep solutions in valid answer range
+                        bounds.setdefault(var1, (0, 99999))
+                        bounds.setdefault(var2, (0, 99999))
+
+                        def update_t_range(x_start: int, step: int, lo: int, hi: int, t_low: int, t_high: int) -> Tuple[int, int]:
+                            if step == 0:
+                                if lo <= x_start <= hi:
+                                    return t_low, t_high
+                                return 1, 0
+                            t1 = (lo - x_start) / step
+                            t2 = (hi - x_start) / step
+                            if step > 0:
+                                lo_t = math.ceil(t1)
+                                hi_t = math.floor(t2)
+                            else:
+                                lo_t = math.ceil(t2)
+                                hi_t = math.floor(t1)
+                            return max(t_low, lo_t), min(t_high, hi_t)
+
+                        t_low, t_high = -10**9, 10**9
+                        if var1 in bounds:
+                            lo, hi = bounds[var1]
+                            t_low, t_high = update_t_range(x0, dx, lo, hi, t_low, t_high)
+                        if var2 in bounds:
+                            lo, hi = bounds[var2]
+                            t_low, t_high = update_t_range(y0, dy, lo, hi, t_low, t_high)
+
+                        if t_low <= t_high:
+                            num_solutions = max(0, t_high - t_low + 1)
+                            wants_count = any(kw in text_lower for kw in ['how many', 'number of solutions', 'count'])
+                            wants_sum = any(kw in text_lower for kw in ['sum of', 'x+y', 'x + y'])
+                            wants_product = 'product' in text_lower
+
+                            if wants_count:
+                                if 0 <= num_solutions <= 99999:
+                                    candidates.append((int(num_solutions), 0.75))
+                            else:
+                                # Pick a representative solution within bounds
+                                t_pick = t_low
+                                x_val = x0 + dx * t_pick
+                                y_val = y0 + dy * t_pick
+                                if bounds.get(var1, (0, 99999))[0] <= x_val <= bounds.get(var1, (0, 99999))[1] and \
+                                   bounds.get(var2, (0, 99999))[0] <= y_val <= bounds.get(var2, (0, 99999))[1]:
+                                    if wants_product:
+                                        candidates.append((x_val * y_val, 0.75))
+                                    elif wants_sum:
+                                        candidates.append((x_val + y_val, 0.75))
+                                    else:
+                                        # Default to x-value if problem doesn't specify
+                                        candidates.append((x_val, 0.7))
+            
             # For modular problems
             if classification['is_modular']:
                 result = SymPySolver.solve_modular_equation(problem_text)
@@ -240,18 +404,23 @@ class CandidateGenerator:
     
     def _try_equation_extraction(self, problem_text: str, classification: Dict[str, Any]) -> List[Tuple[int, int]]:
         """
-        LLM TRANSLATION → SYMPY SOLVE (PRIMARY PIPELINE)
+        LLM TRANSLATION → SYMPY SOLVE (PRIMARY PIPELINE) with temperature sweep retry
         
         Critical separation:
         - LLM: Translate natural language → formal equations (ONLY)
         - SymPy: Solve equations → numeric answer
         
         This is NOT a fallback. This is the MAIN path for 30-50% of problems.
+        Uses temperature sweep [0.1, 0.3, 0.5] for robustness against malformed equations.
         """
         candidates = []
         
         try:
-            translation_prompt = f"""
+            # Temperature sweep: try deterministic first, then increase creativity if failed
+            temperatures = [0.1, 0.3, 0.5]
+            
+            for temp in temperatures:
+                translation_prompt = f"""
 You are a mathematical translator, NOT a solver.
 
 Task: Convert this problem into formal mathematical equations ONLY.
@@ -266,25 +435,41 @@ Rules:
 Problem:
 {problem_text}
 """
-            response = query_llm_json(translation_prompt, max_tokens=250, temperature=0.1)
-            equations = []
-            if response and isinstance(response.get("equations"), list):
-                equations = [str(e).strip() for e in response["equations"] if str(e).strip()]
+                response = query_llm_json(translation_prompt, max_tokens=250, temperature=temp)
+                equations = []
+                if response and isinstance(response.get("equations"), list):
+                    equations = [str(e).strip() for e in response["equations"] if str(e).strip()]
 
-            if not equations:
-                equations_text = query_llm(translation_prompt, max_tokens=250, temperature=0.1)
-                if not equations_text:
-                    return candidates
-                extractor = EquationExtractor()
-                equations = extractor.extract_equations(equations_text)
                 if not equations:
-                    return candidates
-            
-            # STEP 3: SYMPY SOLVES (PRIMARY SOLVER)
-            result = SymPySolver.solve_from_equations(equations, problem_text)
-            if result and result != (0, 0):
-                candidates.append(result)
-                logger.info(f"SymPy solved from LLM-translated equations: {result}")
+                    equations_text = query_llm(translation_prompt, max_tokens=250, temperature=temp)
+                    if not equations_text:
+                        continue  # Try next temperature
+                    extractor = EquationExtractor()
+                    equations = extractor.extract_equations(equations_text)
+                    if not equations:
+                        continue  # Try next temperature
+                
+                # Validate equations are well-formed
+                valid_eqs = []
+                for eq in equations:
+                    eq_str = str(eq)
+                    has_var = any(c.isalpha() for c in eq_str)
+                    has_operator = any(op in eq_str for op in ['+', '-', '*', '/', '=', '^'])
+                    if has_var and has_operator:
+                        valid_eqs.append(eq)
+                
+                if not valid_eqs:
+                    continue  # Try next temperature
+                
+                # STEP 3: SYMPY SOLVES (PRIMARY SOLVER)
+                result = SymPySolver.solve_from_equations(valid_eqs, problem_text)
+                if result and result != (0, 0):
+                    answer, base_conf = result
+                    # Adjust confidence based on temperature (lower temp = higher confidence)
+                    adjusted_conf = base_conf * (1.0 - temp * 0.2)
+                    candidates.append((answer, adjusted_conf))
+                    logger.info(f"SymPy solved from LLM-translated equations (temp={temp}): {result}")
+                    break  # Success, no need to try higher temperatures
         
         except Exception as e:
             logger.debug(f"Translation→solve pipeline error: {e}")
@@ -447,12 +632,40 @@ class AnswerArbitrator:
 
         # Sort by confidence and pick top two unique answers
         scored_candidates.sort(key=lambda x: x[1], reverse=True)
+        # Arbitration Strategy: Select pair based on confidence
+        # If high confidence on best answer with clear margin: return (best, best) for hedging
+        # Otherwise: return (best, second_best) for diversity
+        
         ordered_answers = [ans for ans, _ in scored_candidates]
-
+        ordered_scores = [score for _, score in scored_candidates]
+        
+        if len(ordered_answers) == 0:
+            return (0, 0)
+        
         if len(ordered_answers) == 1:
+            # Only one candidate - return it twice
             return (ordered_answers[0], ordered_answers[0])
-
-        return (ordered_answers[0], ordered_answers[1])
+        
+        # Two or more candidates
+        best_ans = ordered_answers[0]
+        best_score = ordered_scores[0]
+        second_best_ans = ordered_answers[1] if len(ordered_answers) > 1 else best_ans
+        second_score = ordered_scores[1] if len(ordered_answers) > 1 else best_score
+        
+        # Confidence-based hedging strategy
+        # If very high confidence and large margin: bet on same answer twice
+        # Otherwise: diversity bet
+        confidence_threshold = 0.75  # High confidence threshold
+        score_margin_threshold = 0.15  # Margin between best and second-best
+        
+        if best_score >= confidence_threshold and (best_score - second_score) >= score_margin_threshold:
+            # High confidence with clear leader → return same answer twice
+            logger.info(f"High confidence arbitration: ({best_ans}, {best_ans}) [score={best_score:.3f}]")
+            return (best_ans, best_ans)
+        else:
+            # Moderate confidence or close race → diversity strategy
+            logger.info(f"Diversity arbitration: ({best_ans}, {second_best_ans}) [scores={best_score:.3f}, {second_score:.3f}]")
+            return (best_ans, second_best_ans)
  
 
 class StrategyArbiter:
@@ -471,44 +684,78 @@ class StrategyArbiter:
     
     def solve(self, problem_text: str) -> Tuple[int, int]:
         """
-        MASTER PIPELINE:
+        MASTER PIPELINE with per-stage timeout enforcement:
         
-        1. Parse & Classify
-        2. Multi-Candidate Generation
-        3. Verification & Scoring
-        4. Answer Arbitration
+        1. Parse & Classify (0.5s budget)
+        2. Multi-Candidate Generation (15.0s budget)
+        3. Verification & Scoring (5.0s budget)
+        4. Answer Arbitration (1.0s budget)
         """
         self.start_time = time.time()
         if USE_FIXED_SEED:
             ensure_determinism(RANDOM_SEED)
         
         try:
-            # STAGE 1: PARSE & CLASSIFY
-            problem_text = preprocess_problem_text(problem_text)
-            logger.info("Parsing problem...")
+            # STAGE 1: PARSE & CLASSIFY (0.5s max)
+            logger.info("STAGE 1: Parsing and classifying...")
+            try:
+                with time_limit(self.time_per_stage['parse']):
+                    problem_text = preprocess_problem_text(problem_text)
+                    classification = ProblemClassifier.classify(problem_text)
+                    logger.info(f"Classification: {classification['problem_type']}")
+            except TimeoutError:
+                logger.warning("Parse/classify timeout, returning (0, 0)")
+                return (0, 0)
+            except Exception as e:
+                logger.error(f"Parse/classify error: {e}")
+                return (0, 0)
             
-            classification = ProblemClassifier.classify(problem_text)
-            logger.info(f"Classification: {classification['problem_type']}")
-            logger.info(f"Allows symbolic: {classification['allows_symbolic']}")
-            
-            # STAGE 2: MULTI-CANDIDATE GENERATION
-            logger.info("Generating candidates...")
-            remaining_time = self.timeout - (time.time() - self.start_time)
-            generator = CandidateGenerator(timeout_remaining=min(remaining_time, 15.0))
-            candidates = generator.generate(problem_text, classification)
-            
-            logger.info(f"Generated {len(candidates)} candidates: {candidates}")
+            # STAGE 2: MULTI-CANDIDATE GENERATION (15.0s max)
+            logger.info("STAGE 2: Generating candidates...")
+            try:
+                remaining_time = self.timeout - (time.time() - self.start_time)
+                gen_timeout = min(remaining_time, self.time_per_stage['generate'])
+                
+                with time_limit(gen_timeout):
+                    generator = CandidateGenerator(timeout_remaining=gen_timeout)
+                    candidates = generator.generate(problem_text, classification)
+                    logger.info(f"Generated {len(candidates)} candidates: {candidates}")
+            except TimeoutError:
+                logger.warning("Candidate generation timeout")
+                candidates = []
+            except Exception as e:
+                logger.error(f"Candidate generation error: {e}")
+                candidates = []
             
             if not candidates:
                 logger.warning("No candidates generated, returning (0, 0)")
                 return (0, 0)
             
-            # STAGE 3 & 4: VERIFY & ARBITRATE
-            logger.info("Arbitrating candidates...")
-            arbitrator = AnswerArbitrator()
-            final_answer = arbitrator.arbitrate(candidates, problem_text)
+            # STAGE 3 & 4: VERIFY & ARBITRATE (6.0s max combined)
+            logger.info("STAGE 3-4: Verifying and arbitrating...")
+            try:
+                remaining_time = self.timeout - (time.time() - self.start_time)
+                arb_timeout = min(remaining_time, self.time_per_stage['verify'] + self.time_per_stage['arbitrate'])
+                
+                with time_limit(arb_timeout):
+                    arbitrator = AnswerArbitrator()
+                    final_answer = arbitrator.arbitrate(candidates, problem_text)
+                    logger.info(f"Final answer: {final_answer}")
+            except TimeoutError:
+                logger.warning("Verification/arbitration timeout, returning first two candidates")
+                # Fallback: return top 2 candidates as-is
+                if len(candidates) >= 2:
+                    final_answer = (candidates[0][0], candidates[1][0])
+                else:
+                    final_answer = (candidates[0][0], candidates[0][0])
+            except Exception as e:
+                logger.error(f"Verification/arbitration error: {e}")
+                # Fallback: return first two candidates
+                if len(candidates) >= 2:
+                    final_answer = (candidates[0][0], candidates[1][0])
+                else:
+                    final_answer = (candidates[0][0], candidates[0][0])
             
-            logger.info(f"Final answer: {final_answer}")
             return final_answer
         
         except Exception as e:

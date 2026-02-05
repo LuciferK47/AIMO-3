@@ -33,10 +33,9 @@ from typing import List, Tuple, Optional, Dict, Any, Set
 
 from config import *
 from parsing import ProblemParser
-from utils import preprocess_problem_text, query_llm, ensure_determinism, time_limit
+from utils import preprocess_problem_text, query_llm, query_llm_json, ensure_determinism, time_limit
 from sympy_solver import SymPySolver, EquationExtractor, DiophantineSolver
 from validation import AnswerValidator, SelfVerificationLoop
-from utils import preprocess_problem_text, query_llm, query_llm_json, ensure_determinism
 
 logger = logging.getLogger(__name__)
 
@@ -411,72 +410,70 @@ Python code:
     
     def _try_equation_extraction(self, problem_text: str, classification: Dict[str, Any]) -> List[Tuple[int, int]]:
         """
-        LLM TRANSLATION → SYMPY SOLVE (PRIMARY PIPELINE) with temperature sweep retry
+        LLM TRANSLATION → SYMPY SOLVE (PRIMARY PIPELINE) with deterministic JSON extraction.
         
         Critical separation:
-        - LLM: Translate natural language → formal equations (ONLY)
+        - LLM: Translate natural language → formal equations and constraints (ONLY)
         - SymPy: Solve equations → numeric answer
         
         This is NOT a fallback. This is the MAIN path for 30-50% of problems.
-        Uses temperature sweep [0.1, 0.3, 0.5] for robustness against malformed equations.
+        Deterministic temperature=0.0 to avoid instability across runs.
         """
         candidates = []
         
         try:
-            # Temperature sweep: try deterministic first, then increase creativity if failed
-            temperatures = [0.1, 0.3, 0.5]
-            
-            for temp in temperatures:
-                translation_prompt = f"""
-You are a mathematical translator, NOT a solver.
+            translation_prompt = f"""
+You are a mathematical formalizer. Your ONLY job is to extract equations.
 
-Task: Convert this problem into formal mathematical equations ONLY.
+TASK: Convert this problem into a complete formal specification.
 
-Rules:
-- Output ONLY JSON: {{"equations": ["x + y = 10", "2*x - 3*y = 5"]}}
-- Use standard variables: x, y, z, n, k, a, b
-- Do NOT solve
-- Do NOT compute answers
-- Do NOT explain
+OUTPUT FORMAT (strict JSON):
+{{
+  "variables": ["x", "y"],
+  "variable_domains": {{"x": "positive_integer", "y": "nonnegative_integer"}},
+  "equations": ["x + y = 10"],
+  "inequalities": ["x >= 1", "y <= 100"],
+  "objective": "find x" | "count solutions" | "find maximum of x+y"
+}}
 
-Problem:
+RULES:
+1. EVERY variable must have an explicit domain (positive_integer, nonnegative_integer, real)
+2. EVERY constraint mentioned in the problem must appear in equations OR inequalities
+3. The objective must state exactly what to find or count
+4. Do NOT solve. Do NOT compute. Do NOT explain.
+
+PROBLEM:
 {problem_text}
 """
-                response = query_llm_json(translation_prompt, max_tokens=250, temperature=temp)
-                equations = []
-                if response and isinstance(response.get("equations"), list):
-                    equations = [str(e).strip() for e in response["equations"] if str(e).strip()]
+            response = query_llm_json(translation_prompt, max_tokens=350, temperature=0.0)
+            equations = []
+            if response and isinstance(response.get("equations"), list):
+                equations = [str(e).strip() for e in response["equations"] if str(e).strip()]
 
-                if not equations:
-                    equations_text = query_llm(translation_prompt, max_tokens=250, temperature=temp)
-                    if not equations_text:
-                        continue  # Try next temperature
+            if not equations:
+                equations_text = query_llm(translation_prompt, max_tokens=350, temperature=0.0)
+                if equations_text:
                     extractor = EquationExtractor()
                     equations = extractor.extract_equations(equations_text)
-                    if not equations:
-                        continue  # Try next temperature
-                
-                # Validate equations are well-formed
-                valid_eqs = []
-                for eq in equations:
-                    eq_str = str(eq)
-                    has_var = any(c.isalpha() for c in eq_str)
-                    has_operator = any(op in eq_str for op in ['+', '-', '*', '/', '=', '^'])
-                    if has_var and has_operator:
-                        valid_eqs.append(eq)
-                
-                if not valid_eqs:
-                    continue  # Try next temperature
-                
-                # STEP 3: SYMPY SOLVES (PRIMARY SOLVER)
-                result = SymPySolver.solve_from_equations(valid_eqs, problem_text)
-                if result and result != (0, 0):
-                    answer, base_conf = result
-                    # Adjust confidence based on temperature (lower temp = higher confidence)
-                    adjusted_conf = base_conf * (1.0 - temp * 0.2)
-                    candidates.append((answer, adjusted_conf))
-                    logger.info(f"SymPy solved from LLM-translated equations (temp={temp}): {result}")
-                    break  # Success, no need to try higher temperatures
+
+            # Validate equations are well-formed
+            valid_eqs = []
+            for eq in equations:
+                eq_str = str(eq)
+                has_var = any(c.isalpha() for c in eq_str)
+                has_operator = any(op in eq_str for op in ['+', '-', '*', '/', '=', '^'])
+                if has_var and has_operator:
+                    valid_eqs.append(eq)
+            
+            if not valid_eqs:
+                return candidates
+            
+            # STEP 3: SYMPY SOLVES (PRIMARY SOLVER)
+            result = SymPySolver.solve_from_equations(valid_eqs, problem_text)
+            if result and result != (0, 0):
+                answer, base_conf = result
+                candidates.append((answer, base_conf))
+                logger.info("SymPy solved from deterministic LLM-translated equations")
         
         except Exception as e:
             logger.debug(f"Translation→solve pipeline error: {e}")
@@ -485,49 +482,86 @@ Problem:
     
     def _try_case_enumeration(self, problem_text: str, classification: Dict[str, Any]) -> List[Tuple[int, int]]:
         """
-        LLM CASE ENUMERATION → SYMPY COMPUTE
+        LLM CASE ENUMERATION → SAFE COMPUTE (INTERMEDIATE CASES ONLY)
         
-        LLM: "List all cases/values to check"
-        SymPy: Compute/validate each case (enumerate enumeration problem constraints)
+        LLM: Identify enumeration variable and range (NOT final answers)
+        Solver: Compute aggregation deterministically when possible
         
         Useful for: counting problems, modular arithmetic, optimization
-        
-        NOTE: Case enumeration returns CANDIDATE ANSWERS (not intermediate cases).
-        These candidates are verified in the arbitration stage via constraint checks.
         """
         candidates = []
         
         try:
             enumeration_prompt = f"""
-You are a case enumerator, NOT a solver.
+You are a mathematical case lister. You will list INTERMEDIATE values to check, NOT final answers.
 
-Task: List ALL cases or values that need to be checked.
+TASK: Identify the KEY VALUES or CASES that determine the answer.
 
-Rules:
-- Output ONLY JSON: {{"cases": [val1, val2, val3, ...]}}
-- Do NOT compute final answer
-- Just enumerate the search space
-- Each case should be a candidate answer to evaluate
+OUTPUT FORMAT (strict JSON):
+{{
+  "enumeration_variable": "k",
+  "enumeration_range": {{"min": 1, "max": 100}},
+  "filter_condition": "k is prime",
+  "aggregation": "count" | "sum" | "max" | "min"
+}}
 
-Problem:
+RULES:
+1. The enumeration_variable is what we iterate over
+2. The filter_condition is applied to each value
+3. The aggregation tells how to combine results
+4. Do NOT output final answers
+5. Do NOT compute the aggregation
+
+PROBLEM:
 {problem_text}
 """
-            response = query_llm_json(enumeration_prompt, max_tokens=200, temperature=0.2)
-            if response and isinstance(response.get("cases"), list):
-                for case in response["cases"][:10]:
-                    # Case enumeration returns CANDIDATE answers (not intermediate values)
-                    # These are verified via AnswerArbitrator.arbitrate() → SelfVerificationLoop
-                    if isinstance(case, int) and AnswerValidator.check_range(case):
-                        # Case is a candidate; confidence is 0 (needs verification)
-                        candidates.append((case, 0))
-                    elif isinstance(case, str):
-                        # Try to parse string as integer
-                        try:
-                            case_int = int(case)
-                            if AnswerValidator.check_range(case_int):
-                                candidates.append((case_int, 0))
-                        except (ValueError, TypeError):
-                            pass
+            response = query_llm_json(enumeration_prompt, max_tokens=220, temperature=0.0)
+            if not response:
+                return candidates
+
+            enum_var = response.get("enumeration_variable")
+            enum_range = response.get("enumeration_range") or {}
+            filter_condition = str(response.get("filter_condition", "")).lower()
+            aggregation = str(response.get("aggregation", "")).lower()
+
+            if not enum_var or not isinstance(enum_range, dict):
+                return candidates
+
+            min_val = enum_range.get("min")
+            max_val = enum_range.get("max")
+            if not isinstance(min_val, int) or not isinstance(max_val, int):
+                return candidates
+
+            # Simple deterministic filters
+            def passes_filter(v: int) -> bool:
+                if not filter_condition:
+                    return True
+                if "prime" in filter_condition:
+                    return SymPySolver.is_prime(v)
+                if "even" in filter_condition:
+                    return v % 2 == 0
+                if "odd" in filter_condition:
+                    return v % 2 == 1
+                match = re.search(r'divisible by (\d+)', filter_condition)
+                if match:
+                    return v % int(match.group(1)) == 0
+                return True
+
+            values = [v for v in range(min_val, max_val + 1) if passes_filter(v)]
+
+            if aggregation == "count":
+                result = len(values)
+            elif aggregation == "sum":
+                result = sum(values)
+            elif aggregation == "max":
+                result = max(values) if values else None
+            elif aggregation == "min":
+                result = min(values) if values else None
+            else:
+                result = None
+
+            if isinstance(result, int) and AnswerValidator.check_range(result):
+                candidates.append((result, 0.6))
         
         except Exception as e:
             logger.debug(f"Case enumeration error: {e}")
@@ -549,23 +583,24 @@ Problem:
             formalization_prompt = f"""
 You are a mathematical formalizer, NOT a calculator.
 
-Task: Convert this problem into a SINGLE mathematical expression.
+Task: Convert the problem into a single mathematical expression.
 
 Rules:
-- Output ONLY JSON: {{"expression": "2**10 % 7"}}
-- Use Python syntax: **, //, %, factorial(n)
-- Do NOT compute the answer
+- Output ONLY JSON: {{"expression": "<single expression>"}}
+- Use standard variables: x, y, z, n, k, a, b
+- Do NOT solve
+- Do NOT compute answers
 - Do NOT explain
 
 Problem:
 {problem_text}
 """
-            response = query_llm_json(formalization_prompt, max_tokens=150, temperature=0.1)
+            response = query_llm_json(formalization_prompt, max_tokens=150, temperature=0.0)
             expression = None
             if response and isinstance(response.get("expression"), str):
                 expression = response["expression"].strip()
             if not expression:
-                raw = query_llm(formalization_prompt, max_tokens=150, temperature=0.1)
+                raw = query_llm(formalization_prompt, max_tokens=150, temperature=0.0)
                 expression = raw.strip() if raw else None
 
             if expression:
@@ -622,10 +657,6 @@ class AnswerArbitrator:
             if not AnswerValidator.check_modular_constraint(ans, problem_text):
                 logger.debug(f"Answer {ans} failed modular constraint")
                 # Don't reject - modular constraints can be soft
-            # Parity check (only if explicitly required)
-            if not AnswerValidator.check_parity(ans, problem_text):
-                logger.debug(f"Answer {ans} failed parity check")
-                # Don't reject - parity might be red herring
             filtered_answers.append(ans)
         
         if not filtered_answers:

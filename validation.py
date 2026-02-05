@@ -96,14 +96,32 @@ class AnswerValidator:
     
     @staticmethod
     def check_parity(answer: int, problem_text: str) -> bool:
-        """Check even/odd constraint if specified."""
+        """Check even/odd constraint only if explicitly required for the answer."""
         problem_lower = problem_text.lower()
-        
-        if 'even' in problem_lower and answer % 2 != 0:
-            return False
-        if 'odd' in problem_lower and answer % 2 != 1:
-            return False
-        
+
+        explicit_even_patterns = [
+            r'answer\s+is\s+even',
+            r'find\s+(?:the|an)\s+even',
+            r'result\s+is\s+even',
+            r'an\s+even\s+integer',
+            r'even\s+integer\s+solution',
+        ]
+        explicit_odd_patterns = [
+            r'answer\s+is\s+odd',
+            r'find\s+(?:the|an)\s+odd',
+            r'result\s+is\s+odd',
+            r'an\s+odd\s+integer',
+            r'odd\s+integer\s+solution',
+        ]
+
+        for pattern in explicit_even_patterns:
+            if re.search(pattern, problem_lower):
+                return answer % 2 == 0
+
+        for pattern in explicit_odd_patterns:
+            if re.search(pattern, problem_lower):
+                return answer % 2 == 1
+
         return True
     
     @staticmethod

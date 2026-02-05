@@ -48,8 +48,11 @@ SAFE_BUILTINS = {
     'pow': pow,
     'divmod': divmod,
     'round': round,
-    'factorial': __import__('math').factorial,
-    'gcd': __import__('math').gcd,
+    'factorial': math.factorial,
+    'gcd': math.gcd,
+    'comb': math.comb,
+    'perm': math.perm,
+    'isqrt': math.isqrt,
 }
 
 # Forbidden AST node types

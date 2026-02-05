@@ -64,17 +64,41 @@ class ProblemParser:
         """Extract variable ranges from problem text returning dict var_name -> (min, max)."""
         ranges = {}
         
-        # Pattern: "a ≤ x ≤ b" or "a < x < b"
+        # Patterns: "a ≤ x ≤ b", "a < x ≤ b", "x in [a, b]", "for x = 1, 2, ..., n"
         range_patterns = [
-            r'(\d+)\s*(?:≤|<=|<)\s*(\w+)\s*(?:≤|<=|<)\s*(\d+)',
+            r'(\d+)\s*(?:≤|<=|<)\s*([a-zA-Z])\s*(?:≤|<=|<)\s*(\d+)',
+            r'([a-zA-Z])\s*(?:≤|<=|<)\s*(\d+)',
+            r'([a-zA-Z])\s*(?:≥|>=|>)\s*(\d+)',
+            r'([a-zA-Z])\s*(?:in|∈)\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]',
+            r'for\s+([a-zA-Z])\s*=\s*(\d+)\s*,\s*(\d+)\s*,\s*\.\.\.\s*,\s*(\d+)',
         ]
         
         for pattern in range_patterns:
             for match in re.finditer(pattern, text):
-                var = match.group(2)
-                lower = int(match.group(1))
-                upper = int(match.group(3))
-                ranges[var] = (lower, upper)
+                if len(match.groups()) == 3:
+                    # a <= x <= b or x in [a,b]
+                    if match.group(1).isalpha():
+                        var = match.group(1)
+                        lower = int(match.group(2))
+                        upper = int(match.group(3))
+                    else:
+                        lower = int(match.group(1))
+                        var = match.group(2)
+                        upper = int(match.group(3))
+                    ranges[var] = (lower, upper)
+                elif len(match.groups()) == 2:
+                    var = match.group(1)
+                    bound = int(match.group(2))
+                    # Store partial bounds as (min, max) when possible
+                    if '>=' in match.group(0) or '≥' in match.group(0) or '>' in match.group(0):
+                        ranges[var] = (bound, ranges.get(var, (bound, bound))[1])
+                    else:
+                        ranges[var] = (ranges.get(var, (bound, bound))[0], bound)
+                elif len(match.groups()) == 4:
+                    var = match.group(1)
+                    lower = int(match.group(2))
+                    upper = int(match.group(4))
+                    ranges[var] = (lower, upper)
         
         return ranges
     
@@ -96,8 +120,15 @@ class ProblemParser:
             text = re.sub(r'\\right\\}', '}', text)
             text = re.sub(r'\\\+', '+', text)
             text = re.sub(r'\\times', '*', text)
+            text = re.sub(r'\\cdot', '*', text)
             text = re.sub(r'\\div', '/', text)
-            text = re.sub(r'\\frac\{(.+?)\}\{(.+?)\}', r'(\1)/(\2)', text)
+            # Iterative fraction replacement to handle nesting
+            for _ in range(5):
+                new_text = re.sub(r'\\(?:d|t)?frac\{([^{}]+)\}\{([^{}]+)\}', r'(\1)/(\2)', text)
+                if new_text == text:
+                    break
+                text = new_text
+            text = text.replace('≤', '<=').replace('≥', '>=').replace('≠', '!=').replace('≈', '~=')
             text = re.sub(r'\^', '^', text)
             text = re.sub(r'_', '_', text)
             text = re.sub(r'\\[a-zA-Z]+', '', text)

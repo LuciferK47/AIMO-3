@@ -43,7 +43,10 @@ NUM_REASONING_ATTEMPTS = 4
 NUM_PYTHON_ATTEMPTS = 2
 NUM_DECOMPOSED_ATTEMPTS = 1
 
-TEMPERATURE_RANGE = (0.3, 1.0)
+# CRITICAL: Set to 0.0 for reproducibility on double-run format
+# Temperature > 0 introduces variance across submissions
+TEMPERATURE_RANGE = (0.0, 0.0)
+LLM_TEMPERATURE_DETERMINISTIC = 0.0  # For all LLM calls
 MAX_TOKENS_REASONING = 512
 MAX_TOKENS_PYTHON = 256
 MAX_TOKENS_DECOMPOSED = 512
@@ -95,8 +98,9 @@ MAX_EQUATION_COMPLEXITY = 5     # Max number of equations in a system
 
 # LLM limits
 MAX_LLM_CALLS_PER_PROBLEM = 10  # Total LLM API calls allowed per problem
-LLM_TEMPERATURE_DETERMINISTIC = 0.1  # For translator mode (low randomness)
-LLM_TEMPERATURE_CREATIVE = 0.3       # For case enumeration (slight variation)
+# CRITICAL: Set to 0.0 for reproducibility on double-run format
+LLM_TEMPERATURE_DETERMINISTIC = 0.0  # For all LLM calls (no randomness)
+LLM_TEMPERATURE_CREATIVE = 0.0       # For case enumeration (deterministic)
 
 # Time budgets per stage
 TIME_BUDGET_PARSE = 0.5         # seconds
@@ -259,4 +263,7 @@ USE_CACHING = True
 CACHE_RESULT_EXPIRY = 3600  # seconds
 MAX_CACHE_SIZE = 1000
 
-print("✓ Configuration loaded successfully")
+# DEBUG flag for logging configuration load (avoid polluting Kaggle logs)
+_DEBUG = False
+if _DEBUG:
+    print("✓ Configuration loaded successfully")

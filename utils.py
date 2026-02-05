@@ -143,10 +143,14 @@ def clamp_to_range(value: Any, min_val: int = 0, max_val: int = 99999) -> int:
         return min_val
 
 
-def find_most_common(answers: List[int], weights: Optional[List[float]] = None) -> int:
-    """Find most common answer from list."""
+def find_most_common(answers: List[int], weights: Optional[List[float]] = None) -> Optional[int]:
+    """
+    Find most common answer from list.
+    
+    Returns None if list is empty (don't default to 0, since 0 is a valid answer).
+    """
     if not answers:
-        return 0
+        return None
     
     if weights is None:
         weights = [1.0] * len(answers)
@@ -238,7 +242,7 @@ def agreement_score(answers: List[int]) -> float:
     return max_count / len(answers)
 
 
-def query_llm(prompt: str, max_tokens: int = 500, temperature: float = 0.2) -> Optional[str]:
+def query_llm(prompt: str, max_tokens: int = 500, temperature: float = None) -> Optional[str]:
     """
     Query LLM with disciplined prompt.
     
@@ -255,14 +259,18 @@ def query_llm(prompt: str, max_tokens: int = 500, temperature: float = 0.2) -> O
     Args:
         prompt: Disciplined prompt (should enforce equation/answer format)
         max_tokens: Maximum response length
-        temperature: Sampling temperature (0.2 = deterministic, 0.5 = creative)
+        temperature: Sampling temperature (0.0 = deterministic). If None, uses LLM_TEMPERATURE_DETERMINISTIC from config.
     
     Returns:
         LLM response text (may be None if API fails)
     """
     try:
         # Import LLM client (uses config.py settings)
-        from config import LLM_CLIENT, LLM_MODEL, LLM_API_KEY
+        from config import LLM_CLIENT, LLM_MODEL, LLM_API_KEY, LLM_TEMPERATURE_DETERMINISTIC
+        
+        # Use deterministic temperature from config if not specified
+        if temperature is None:
+            temperature = LLM_TEMPERATURE_DETERMINISTIC
         
         if LLM_CLIENT == "huggingface":
             # Local model support for Kaggle offline mode

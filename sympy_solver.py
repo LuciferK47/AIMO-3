@@ -7,6 +7,8 @@ Converts LLM-generated formulas into deterministic computations.
 
 import logging
 import re
+import math
+from multiprocessing import Process, Queue
 from typing import Optional, List, Tuple, Any, Union, Dict
 from utils import time_limit
 
@@ -36,10 +38,54 @@ except Exception as e:
 logger = logging.getLogger(__name__)
 
 
+def safe_sympify(expr_str: str) -> Optional[Any]:
+    """
+    Safely parse a string into SymPy expression with restricted namespace.
+    
+    Prevents injection attacks like sympify("__import__('os').system('rm -rf /')")
+    by using a restricted namespace with only math symbols.
+    """
+    if not SYMPY_AVAILABLE or not isinstance(expr_str, str):
+        return None
+    
+    try:
+        # Use restricted namespace with only safe math operations
+        restricted_names = {
+            'sqrt': sp.sqrt,
+            'sin': sp.sin,
+            'cos': sp.cos,
+            'tan': sp.tan,
+            'log': sp.log,
+            'exp': sp.exp,
+            'pi': sp.pi,
+            'E': sp.E,
+            'I': sp.I,
+            'oo': sp.oo,
+        }
+        # Allow numeric operations but no imports/system calls
+        return sp.sympify(expr_str, locals=restricted_names, rational=False)
+    except Exception as e:
+        logger.debug(f"sympify failed for '{expr_str}': {type(e).__name__}")
+        return None
+
+
+
+def _solve_worker(equation_expr: Any, symbols_list: List[Any], queue: Queue) -> None:
+    """Worker process for solve with hard timeout."""
+    try:
+        result = sp.solve(equation_expr, symbols_list)
+        queue.put(("success", result))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
 def solve_with_timeout(equation_expr: Any, symbols_list: List[Any], 
                        timeout: float = 2.0) -> Optional[List[Any]]:
     """
-    Solve SymPy equation with timeout protection.
+    Solve SymPy equation with hard timeout protection via multiprocessing.
+    
+    This uses Process.terminate() to forcefully kill SymPy's C extensions,
+    avoiding hangs on pathological inputs (nested radicals, high-degree polynomials).
     
     Args:
         equation_expr: SymPy equation or expression
@@ -53,14 +99,34 @@ def solve_with_timeout(equation_expr: Any, symbols_list: List[Any],
         return None
     
     try:
-        with time_limit(timeout):
-            return sp.solve(equation_expr, symbols_list)
-    except TimeoutError:
-        logger.warning(f"SymPy solve timeout after {timeout}s")
+        queue: Queue = Queue()
+        process = Process(target=_solve_worker, args=(equation_expr, symbols_list, queue))
+        process.start()
+        process.join(timeout=timeout)
+        
+        if process.is_alive():
+            # Hard kill the process if it's still running
+            process.terminate()
+            process.join(timeout=0.5)
+            if process.is_alive():
+                process.kill()
+            logger.warning(f"SymPy solve timeout after {timeout}s (hard killed)")
+            return None
+        
+        # Check if result is available
+        if not queue.empty():
+            status, result = queue.get()
+            if status == "success":
+                return result
+            else:
+                logger.debug(f"SymPy solve error: {result}")
+                return None
+        
         return None
     except Exception as e:
-        logger.debug(f"SymPy solve error: {e}")
+        logger.debug(f"SymPy solve exception: {type(e).__name__}: {e}")
         return None
+
 
 
 
@@ -69,20 +135,35 @@ class SymPySolver:
 
     @staticmethod
     def verify_solution(equation_str: str, variable: str, solution: int) -> bool:
-        """Plug solution back into equation to verify."""
+        """
+        Plug solution back into equation to verify.
+        
+        CRITICAL: Never silently pass on exception. Log and return False.
+        Exceptions indicate unparseable equations - treat as unverified.
+        """
         if not SYMPY_AVAILABLE:
             return True
         try:
             var = sp.Symbol(variable)
             if '=' in equation_str:
                 lhs, rhs = equation_str.split('=')
-                lhs_val = sp.sympify(lhs).subs(var, solution)
-                rhs_val = sp.sympify(rhs).subs(var, solution)
+                lhs_val = safe_sympify(lhs)
+                rhs_val = safe_sympify(rhs)
+                if lhs_val is None or rhs_val is None:
+                    logger.warning(f"Could not parse equation: {equation_str}")
+                    return False
+                lhs_val = lhs_val.subs(var, solution)
+                rhs_val = rhs_val.subs(var, solution)
                 return sp.simplify(lhs_val - rhs_val) == 0
-            expr_val = sp.sympify(equation_str).subs(var, solution)
+            expr = safe_sympify(equation_str)
+            if expr is None:
+                logger.warning(f"Could not parse expression: {equation_str}")
+                return False
+            expr_val = expr.subs(var, solution)
             return sp.simplify(expr_val) == 0
-        except Exception:
-            return True
+        except Exception as e:
+            logger.warning(f"Verification failed for {equation_str}={solution}: {type(e).__name__}: {e}")
+            return False
 
     @staticmethod
     def solve_crt(remainders: List[int], moduli: List[int]) -> Optional[int]:
@@ -119,9 +200,17 @@ class SymPySolver:
             # Parse equation: handle "= 0" explicitly or assume it's set to 0
             if '=' in equation_str:
                 lhs, rhs = equation_str.split('=')
-                eq = sp.sympify(lhs) - sp.sympify(rhs)
+                lhs_expr = safe_sympify(lhs)
+                rhs_expr = safe_sympify(rhs)
+                if lhs_expr is None or rhs_expr is None:
+                    logger.warning(f"Could not parse equation: {equation_str}")
+                    return None
+                eq = lhs_expr - rhs_expr
             else:
-                eq = sp.sympify(equation_str)
+                eq = safe_sympify(equation_str)
+                if eq is None:
+                    logger.warning(f"Could not parse expression: {equation_str}")
+                    return None
             
             # Use timeout wrapper to prevent hangs
             solutions = solve_with_timeout(eq, [var], timeout=2.0)

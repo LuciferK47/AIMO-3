@@ -215,33 +215,6 @@ class ComputationCache:
         self.gcd_cache.clear()
 
 
-# Global cache instances
-_result_cache = ResultCache()
-_memo_cache = MemoizationCache()
-_subproblem_cache = SubproblemCache()
-_computation_cache = ComputationCache()
-
-
-def get_result_cache() -> ResultCache:
-    """Get global result cache."""
-    return _result_cache
-
-
-def get_memoization_cache() -> MemoizationCache:
-    """Get global memoization cache."""
-    return _memo_cache
-
-
-def get_subproblem_cache() -> SubproblemCache:
-    """Get global subproblem cache."""
-    return _subproblem_cache
-
-
-def get_computation_cache() -> ComputationCache:
-    """Get global computation cache."""
-    return _computation_cache
-
-
 def cache_result(func: Callable) -> Callable:
     """
     Decorator to cache function results using ResultCache.
@@ -257,13 +230,13 @@ def cache_result(func: Callable) -> Callable:
         cache_key = json.dumps({'args': args, 'kwargs': kwargs}, default=str)
         
         # Check cache
-        cached = _result_cache.get(cache_key)
+        cached = get_result_cache().get(cache_key)
         if cached is not None:
             return cached
         
         # Compute and cache
         result = func(*args, **kwargs)
-        _result_cache.put(cache_key, result)
+        get_result_cache().put(cache_key, result)
         
         return result
     
@@ -353,14 +326,32 @@ class IntermediateFormCache:
             logger.debug("Intermediate cache evicted oldest entry")
 
 
-# Global instances
+# Global instances (SINGLE DEFINITION - avoid duplication)
 _result_cache = ResultCache()
+_memo_cache = MemoizationCache()
+_subproblem_cache = SubproblemCache()
+_computation_cache = ComputationCache()
 _intermediate_cache = IntermediateFormCache()
 
 
 def get_result_cache() -> ResultCache:
     """Get global result cache instance."""
     return _result_cache
+
+
+def get_memoization_cache() -> MemoizationCache:
+    """Get global memoization cache."""
+    return _memo_cache
+
+
+def get_subproblem_cache() -> SubproblemCache:
+    """Get global subproblem cache."""
+    return _subproblem_cache
+
+
+def get_computation_cache() -> ComputationCache:
+    """Get global computation cache."""
+    return _computation_cache
 
 
 def get_intermediate_cache() -> IntermediateFormCache:

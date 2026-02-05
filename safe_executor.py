@@ -11,6 +11,7 @@ as Python code. This module provides sandboxed execution with:
 
 import ast
 import logging
+import math
 import sys
 from typing import Optional, List, Tuple, Any
 from io import StringIO
@@ -159,7 +160,8 @@ def safe_execute(code: str,
                 raise TimeoutError(f"Code execution exceeded {timeout}s timeout")
             
             old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(int(timeout) + 1)  # +1 for signal delay tolerance
+            # Use math.ceil to avoid truncating fractional timeouts (0.5s → 1s not 0s)
+            signal.alarm(math.ceil(timeout) + 1)  # +1 for signal delay tolerance
             
             try:
                 exec(code, restricted_globals, restricted_locals)

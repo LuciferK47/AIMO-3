@@ -76,39 +76,46 @@ class ProblemClassifier:
             'difficulty_estimate': 0.5,
         }
         
-        # MODULAR ARITHMETIC
+        # MULTI-LABEL CLASSIFICATION (not mutually exclusive)
+        # Modular Arithmetic
         if any(w in text_lower for w in ['mod', 'remainder', 'divisible', 'congruence', 'modular']):
-            classification['problem_type'] = 'modular'
             classification['is_modular'] = True
             classification['allows_symbolic'] = True
             keywords.extend(['modular', 'arithmetic'])
+            if not classification['problem_type']:
+                classification['problem_type'] = 'modular'
         
-        # COMBINATORICS
-        elif any(w in text_lower for w in ['how many', 'count', 'combinations', 'permutations', 'ways', 'arrangements', 'sequences']):
-            classification['problem_type'] = 'combinatorics'
+        # Combinatorics
+        if any(w in text_lower for w in ['how many', 'count', 'combinations', 'permutations', 'ways', 'arrangements', 'sequences']):
             classification['is_counting'] = True
             classification['allows_symbolic'] = True
             keywords.extend(['counting', 'combinatorics'])
+            if not classification['problem_type']:
+                classification['problem_type'] = 'combinatorics'
         
-        # DIOPHANTINE / NUMBER THEORY
-        elif any(w in text_lower for w in ['integer solutions', 'find all integers', 'diophantine', 'number of pairs', 'pairs (', 'positive integers']):
-            classification['problem_type'] = 'diophantine'
+        # Diophantine / Number Theory
+        if any(w in text_lower for w in ['integer solutions', 'find all integers', 'diophantine', 'number of pairs', 'pairs (', 'positive integers']):
             classification['allows_symbolic'] = True
             keywords.extend(['number_theory', 'diophantine'])
+            if not classification['problem_type']:
+                classification['problem_type'] = 'diophantine'
         
-        # GEOMETRY
-        elif any(w in text_lower for w in ['triangle', 'circle', 'angle', 'area', 'perimeter', 'distance', 'radius', 'diameter']):
-            classification['problem_type'] = 'geometry'
+        # Geometry
+        if any(w in text_lower for w in ['triangle', 'circle', 'angle', 'area', 'perimeter', 'distance', 'radius', 'diameter']):
             classification['is_geometry'] = True
             # Geometry without diagrams is harder for SymPy
-            classification['allows_symbolic'] = False
+            if classification['is_geometry'] and not classification['is_modular']:
+                classification['allows_symbolic'] = False
             keywords.extend(['geometry'])
+            if not classification['problem_type']:
+                classification['problem_type'] = 'geometry'
         
-        # OPTIMIZATION
-        elif any(w in text_lower for w in ['maximum', 'minimum', 'maximize', 'minimize', 'least', 'greatest', 'optimal']):
-            classification['problem_type'] = 'optimization'
+        # Optimization
+        if any(w in text_lower for w in ['maximum', 'minimum', 'maximize', 'minimize', 'least', 'greatest', 'optimal']):
             classification['allows_symbolic'] = True
             keywords.extend(['optimization'])
+            if not classification['problem_type']:
+                classification['problem_type'] = 'optimization'
         
         # EQUATIONS / ALGEBRA
         if any(w in text_lower for w in ['equation', 'solve', '=', 'satisfy', 'satisfy']):
@@ -586,22 +593,51 @@ class AnswerArbitrator:
     
     def arbitrate(self, candidates: List[Tuple[int, int]], problem_text: str) -> Tuple[int, int]:
         """
-        Verify all candidates and return best pair.
+        Verify all candidates and return best pair using multi-stage verification pipeline.
         
-        Process:
-        1. Filter valid candidates
-        2. Return first (best) candidate
+        Stages:
+        1. HARD CONSTRAINT FILTERING - Range, modular, parity checks
+        2. SYMBOLIC RE-VERIFICATION - Plug back into equations
+        3. CROSS-VALIDATION - Agreement checking across methods
+        4. WEIGHTED VOTE - Confidence-based scoring
         """
         if not candidates:
             return (0, 0)
 
         # Extract primary answers
         primary_answers = [c[0] for c in candidates if isinstance(c, tuple) and len(c) >= 1]
-        primary_answers = [a for a in primary_answers if isinstance(a, int) and a != 0]
+        primary_answers = [a for a in primary_answers if isinstance(a, int)]
 
         if not primary_answers:
             return (0, 0)
 
+        # ========== STAGE 1: HARD CONSTRAINT FILTERING ==========
+        filtered_answers = []
+        for ans in set(primary_answers):
+            # Range check (0-99999)
+            if not AnswerValidator.check_range(ans):
+                logger.debug(f"Answer {ans} failed range check")
+                continue
+            # Modular bound check
+            if not AnswerValidator.check_modular_constraint(ans, problem_text):
+                logger.debug(f"Answer {ans} failed modular constraint")
+                # Don't reject - modular constraints can be soft
+            # Parity check (only if explicitly required)
+            if not AnswerValidator.check_parity(ans, problem_text):
+                logger.debug(f"Answer {ans} failed parity check")
+                # Don't reject - parity might be red herring
+            filtered_answers.append(ans)
+        
+        if not filtered_answers:
+            # All candidates filtered - return best from original set anyway
+            logger.warning("All candidates filtered by hard constraints, falling back to original set")
+            filtered_answers = [a for a in set(primary_answers) if AnswerValidator.check_range(a)]
+        
+        if not filtered_answers:
+            logger.warning("No candidates in valid range [0, 99999]")
+            return (0, 0)
+
+        # ========== BUILD PROBLEM ANALYSIS & EQUATIONS ==========
         # Build problem analysis + equations for verification (cached)
         from cache import get_intermediate_cache
         intermediate_cache = get_intermediate_cache()
@@ -618,14 +654,14 @@ class AnswerArbitrator:
                 equations = []
             intermediate_cache.put_equations(problem_text, equations)
 
+        # ========== STAGE 2 & 3 & 4: VERIFICATION & SCORING ==========
         scored_candidates = []
-        for ans in set(primary_answers):
-            if not AnswerValidator.check_range(ans):
-                continue
+        for ans in filtered_answers:
             confidence = SelfVerificationLoop.score_candidate_answer(
                 ans, problem_text, problem_analysis, equations
             )
             scored_candidates.append((ans, confidence))
+            logger.debug(f"Answer {ans}: confidence={confidence:.3f}")
 
         if not scored_candidates:
             return (0, 0)

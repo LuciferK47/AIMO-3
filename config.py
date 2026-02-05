@@ -38,47 +38,19 @@ LLM_API_KEY = (
 # HYPERPARAMETERS
 # ============================================================================
 
-# Generation parameters
-NUM_REASONING_ATTEMPTS = 4
-NUM_PYTHON_ATTEMPTS = 2
-NUM_DECOMPOSED_ATTEMPTS = 1
-
 # CRITICAL: Set to 0.0 for reproducibility on double-run format
 # Temperature > 0 introduces variance across submissions
-TEMPERATURE_RANGE = (0.0, 0.0)
-LLM_TEMPERATURE_DETERMINISTIC = 0.0  # For all LLM calls
-MAX_TOKENS_REASONING = 512
+LLM_TEMPERATURE_DETERMINISTIC = 0.0  # For all LLM calls (deterministic)
+MAX_TOKENS_EQUATION = 300
 MAX_TOKENS_PYTHON = 256
-MAX_TOKENS_DECOMPOSED = 512
+MAX_TOKENS_ENUM = 200
 
 # Timeouts
-TIMEOUT_PER_ATTEMPT = 6.0
+TIMEOUT_PER_STRATEGY = 5.0  # Maximum time per strategy
 TIMEOUT_PYTHON_EXECUTION = 4.0
+TIMEOUT_SYMPY_SOLVE = 2.0
 TIMEOUT_GEOMETRY_ATTEMPT = 2.0
-DEFAULT_TIMEOUT_PER_PROBLEM = 60.0
-
-# PRM Configuration
-PRM_QUALITY_THRESHOLD = 0.6
-PRM_AGGREGATION_METHOD = "min"  # mean, min, harmonic_mean, product
-
-# Resource Manager Configuration
-TOTAL_COMPETITION_BUDGET = 18000.0  # 5 hours
-BASE_BUDGET_PER_PROBLEM = 180.0    # 3 minutes
-DIFFICULTY_EASY_THRESHOLD = 0.3
-DIFFICULTY_HARD_THRESHOLD = 0.7
-EASY_MULTIPLIER = 0.5
-HARD_MULTIPLIER = 2.0
-CONSENSUS_THRESHOLD = 0.8
-MAX_BUDGET_FRACTION = 0.4
-
-# Ensemble Configuration
-PYTHON_EXECUTION_WEIGHT = 3.0
-DEFAULT_MODEL_RELIABILITY = 0.5
-SYMPY_RELIABILITY = 0.90
-PYTHON_RELIABILITY = 0.85
-DECOMPOSED_RELIABILITY = 0.70
-COT_RELIABILITY = 0.65
-GEOMETRY_RELIABILITY = 0.60
+DEFAULT_TIMEOUT_PER_PROBLEM = 30.0  # Total time budget
 
 # Answer validation
 MIN_ANSWER = 0
@@ -90,17 +62,14 @@ MAX_ANSWER = 99999
 
 # Candidate generation limits
 MAX_CANDIDATES_PER_PROBLEM = 5  # Hard cap on candidates generated
-MAX_RETRIES_PER_STRATEGY = 2    # Max retries if strategy fails
+MAX_RETRIES_PER_STRATEGY = 1    # Max retries if strategy fails (reduced from 2)
 
 # Symbolic solving limits
 MAX_SYMBOLIC_DEPTH = 10         # Max recursion depth for symbolic solving
 MAX_EQUATION_COMPLEXITY = 5     # Max number of equations in a system
 
 # LLM limits
-MAX_LLM_CALLS_PER_PROBLEM = 10  # Total LLM API calls allowed per problem
-# CRITICAL: Set to 0.0 for reproducibility on double-run format
-LLM_TEMPERATURE_DETERMINISTIC = 0.0  # For all LLM calls (no randomness)
-LLM_TEMPERATURE_CREATIVE = 0.0       # For case enumeration (deterministic)
+MAX_LLM_CALLS_PER_PROBLEM = 6   # Total LLM API calls: 2 per strategy × 3 strategies
 
 # Time budgets per stage
 TIME_BUDGET_PARSE = 0.5         # seconds

@@ -57,6 +57,18 @@ class AnswerValidator:
         return min_val <= answer <= max_val
     
     @staticmethod
+    def _extract_modulo(problem_text: str) -> Optional[int]:
+        """Extract modulo value from problem text."""
+        problem_lower = problem_text.lower()
+        match = re.search(r'(?:mod|modulo|divided by)\s+(\d+)', problem_lower)
+        if match:
+            try:
+                return int(match.group(1))
+            except Exception:
+                pass
+        return None
+    
+    @staticmethod
     def check_implicit_bounds(answer: int, problem_text: str) -> bool:
         """
         Extract and check implicit bounds from problem text.
@@ -270,107 +282,6 @@ class DeterministicVerifier:
                 return False
         except (ValueError, IndexError, AttributeError):
             return False
-
-
-# ============================================================================
-# ANTI-HALLUCINATION CHECKER
-# ============================================================================
-
-class AntiHallucinationChecker:
-    """Detect hallucinated answers and suspicious patterns."""
-    
-    # Pattern-based checks
-    SUSPICIOUS_PATTERNS = {
-        'round_number': [100, 1000, 10000],
-        'power_of_two': [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
-        'factorial': [2, 6, 24, 120, 720, 5040, 40320, 362880],
-        'fibonacci': [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987],
-        'prime': [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47],
-    }
-    
-    @staticmethod
-    def check_magnitude_plausibility(answer: int, problem_text: str) -> float:
-        """
-        Check if answer magnitude seems plausible.
-        
-        Returns:
-            Suspicion score [0, 1] where 0 = not suspicious, 1 = very suspicious
-        """
-        suspicion = 0.0
-        
-        # Extremely large answers are suspicious
-        if answer > 50000:
-            suspicion += 0.2
-        
-        # Extremely small answers for "count" problems
-        if answer < 10 and 'how many' in problem_text.lower():
-            suspicion += 0.1
-        
-        # Very round numbers are often hallucinations
-        if answer in [100, 1000, 10000]:
-            suspicion += 0.15
-        
-        return min(1.0, suspicion)
-    
-    @staticmethod
-    def check_common_hallucinations(answer: int, problem_text: str) -> float:
-        """
-        Check for common AI hallucination patterns.
-        
-        Returns:
-            Suspicion score [0, 1]
-        """
-        suspicion = 0.0
-        
-        # Check if answer is a suspicious "special" number
-        for category, numbers in AntiHallucinationChecker.SUSPICIOUS_PATTERNS.items():
-            if answer in numbers:
-                # Context-dependent suspicion
-                if category == 'round_number':
-                    suspicion += 0.1
-                elif category in ['factorial', 'fibonacci'] and 'sequence' not in problem_text.lower():
-                    suspicion += 0.2
-        
-        return min(1.0, suspicion)
-    
-    @staticmethod
-    def check_digit_patterns(answer: int) -> float:
-        """
-        Check for suspicious digit patterns.
-        
-        Returns:
-            Suspicion score [0, 1]
-        """
-        suspicion = 0.0
-        answer_str = str(answer)
-        
-        # Repeating digits (111, 222, etc.)
-        if len(set(answer_str)) == 1:
-            suspicion += 0.2
-        
-        # Sequential digits (123, 456, etc.)
-        if all(int(answer_str[i+1]) - int(answer_str[i]) == 1 for i in range(len(answer_str)-1)):
-            suspicion += 0.15
-        
-        return min(1.0, suspicion)
-    
-    @staticmethod
-    def run_full_check(answer: int, problem_text: str) -> Dict[str, float]:
-        """
-        Run all hallucination checks.
-        
-        Returns:
-            Dictionary with individual and total suspicion scores
-        """
-        checks = {
-            'magnitude': AntiHallucinationChecker.check_magnitude_plausibility(answer, problem_text),
-            'common_hallucination': AntiHallucinationChecker.check_common_hallucinations(answer, problem_text),
-            'digit_pattern': AntiHallucinationChecker.check_digit_patterns(answer),
-        }
-        
-        checks['total_suspicion'] = min(1.0, sum(checks.values()) / len(checks))
-        
-        return checks
 
 
 # ============================================================================

@@ -223,14 +223,14 @@ class SymPySolver:
     @staticmethod
     def solve_system(equations: List[str], variables: List[str]) -> Optional[dict]:
         """
-        Solve a system of equations.
+        Solve a system of equations WITH TIMEOUT PROTECTION.
         
         Args:
             equations: List of equation strings
             variables: List of variable names
             
         Returns:
-            Dict of solutions, or None if solving fails
+            Dict of solutions, or None if solving fails/times out
         """
         if not SYMPY_AVAILABLE:
             return None
@@ -246,9 +246,17 @@ class SymPySolver:
                 else:
                     eq_objs.append(sp.Eq(sp.sympify(eq_str), 0))
             
-            solution = sp.solve(eq_objs, var_objs)
-            logger.debug(f"System solutions: {solution}")
-            return solution
+            # Use timeout wrapper to prevent hangs on complex systems
+            def _solve_system():
+                return sp.solve(eq_objs, var_objs)
+            
+            with time_limit(2.0):
+                solution = _solve_system()
+                logger.debug(f"System solutions: {solution}")
+                return solution
+        except TimeoutError:
+            logger.warning(f"System solve timeout after 2s")
+            return None
         except Exception as e:
             logger.debug(f"SymPy system solve failed: {e}")
             return None
@@ -256,22 +264,27 @@ class SymPySolver:
     @staticmethod
     def simplify_expression(expr_str: str) -> Optional[str]:
         """
-        Simplify an algebraic expression.
+        Simplify an algebraic expression WITH TIMEOUT PROTECTION.
         
         Args:
             expr_str: Expression string like "2*x + 3*x"
             
         Returns:
-            Simplified expression, or None if fails
+            Simplified expression, or None if fails/times out
         """
         if not SYMPY_AVAILABLE:
             return None
         
         try:
             expr = sp.sympify(expr_str)
-            simplified = sp.simplify(expr)
-            logger.debug(f"Simplified: {expr} -> {simplified}")
-            return str(simplified)
+            # Simplify can hang on complex expressions
+            with time_limit(1.0):
+                simplified = sp.simplify(expr)
+                logger.debug(f"Simplified: {expr} -> {simplified}")
+                return str(simplified)
+        except TimeoutError:
+            logger.warning(f"Simplify timeout after 1s")
+            return None
         except Exception as e:
             logger.debug(f"SymPy simplify failed: {e}")
             return None
@@ -481,8 +494,9 @@ class SymPySolver:
                         lhs, rhs = eq_str.split('=', 1)
                         sympy_eqs.append(sp.Eq(sp.sympify(lhs), sp.sympify(rhs)))
                     
-                    if sympy_eqs:
-                        symbols = sp.symbols(' '.join(var_list))
+                    if sympy_eqs: WITH TIMEOUT PROTECTION
+                        with time_limit(2.0):
+                            symbols = sp.symbols(' '.join(var_list))
                         if not isinstance(symbols, tuple):
                             symbols = (symbols,)
                         
@@ -725,6 +739,61 @@ class GeometrySolver:
     """Geometry specific solvers."""
     
     @staticmethod
+    def solve_coordinate_geometry(problem_text: str) -> Optional[Tuple[int, int]]:
+        """
+        Coordinate geometry solver (D6 from brutal assessment).
+        
+        Patterns:
+        - Triangle vertices → area/perimeter
+        - Distance formulas
+        - Circles with coordinates
+        - Line intersections
+        
+        Returns (answer, confidence) or None.
+        """
+        try:
+            text_lower = problem_text.lower()
+            
+            # Pattern 1: Triangle with coordinates → area
+            coords = re.findall(r'\((\-?\d+),\s*(\-?\d+)\)', problem_text)
+            if len(coords) >= 3 and ('area' in text_lower or 'triangle' in text_lower):
+                x1, y1 = int(coords[0][0]), int(coords[0][1])
+                x2, y2 = int(coords[1][0]), int(coords[1][1])
+                x3, y3 = int(coords[2][0]), int(coords[2][1])
+                
+                area = abs((x1*(y2-y3) + x2*(y3-y1) + x3*(y1-y2)) / 2.0)
+                return (int(area), 0.8)
+            
+            # Pattern 2: Distance between two points
+            if len(coords) == 2 and 'distance' in text_lower:
+                x1, y1 = int(coords[0][0]), int(coords[0][1])
+                x2, y2 = int(coords[1][0]), int(coords[1][1])
+                
+                dist_sq = (x2-x1)**2 + (y2-y1)**2
+                dist = math.sqrt(dist_sq)
+                
+                # Check if asking for squared distance
+                if 'square' in text_lower or 'squared' in text_lower:
+                    return (int(dist_sq), 0.9)
+                else:
+                    return (int(round(dist)), 0.8)
+            
+            # Pattern 3: Circle radius given center and point
+            if 'circle' in text_lower and 'radius' in text_lower and len(coords) >= 2:
+                x1, y1 = int(coords[0][0]), int(coords[0][1])  # center
+                x2, y2 = int(coords[1][0]), int(coords[1][1])  # point on circle
+                
+                radius_sq = (x2-x1)**2 + (y2-y1)**2
+                radius = math.sqrt(radius_sq)
+                
+                return (int(round(radius)), 0.8)
+            
+            return None
+        except Exception as e:
+            logger.debug(f"Coordinate geometry failed: {e}")
+            return None
+    
+    @staticmethod
     def distance_2d(x1: float, y1: float, x2: float, y2: float) -> float:
         """Compute Euclidean distance between two points."""
         import math
@@ -823,6 +892,74 @@ class DiophantineSolver:
             return (int(x0 * scale), int(y0 * scale))
         except Exception as e:
             logger.debug(f"Linear Diophantine solve failed: {e}")
+            return None
+    
+    @staticmethod
+    def quadratic_diophantine(problem_text: str) -> Optional[Tuple[int, int]]:
+        """
+        Solve quadratic Diophantine equations (D2 from brutal assessment):
+        - x² + y² = n (sum of two squares)
+        - x² - y² = n (difference of squares)
+        - xy = n (product)
+        
+        Returns (answer, confidence) or None.
+        """
+        try:
+            # Pattern 1: x² + y² = n
+            match = re.search(r'x\*\*2\s*\+\s*y\*\*2\s*=\s*(\d+)', problem_text)
+            if not match:
+                match = re.search(r'x\^2\s*\+\s*y\^2\s*=\s*(\d+)', problem_text)
+            if not match:
+                match = re.search(r'x²\s*\+\s*y²\s*=\s*(\d+)', problem_text)
+            
+            if match:
+                n = int(match.group(1))
+                # Bounded search for x² + y² = n
+                solutions = []
+                limit = min(int(math.sqrt(n)) + 1, 1000)
+                for x in range(limit):
+                    remainder = n - x*x
+                    if remainder < 0:
+                        break
+                    y = int(math.sqrt(remainder))
+                    if y*y == remainder:
+                        solutions.append((x, y))
+                
+                if solutions:
+                    # Check what the problem wants
+                    text_lower = problem_text.lower()
+                    if 'how many' in text_lower or 'count' in text_lower:
+                        # Count distinct solutions (consider symmetry)
+                        unique = len(set((min(x,y), max(x,y)) for x,y in solutions))
+                        return (unique, 0.8)
+                    elif 'sum' in text_lower or 'x+y' in text_lower or 'x + y' in text_lower:
+                        return (solutions[0][0] + solutions[0][1], 0.8)
+                    else:
+                        # Return x value of first solution
+                        return (solutions[0][0], 0.7)
+            
+            # Pattern 2: xy = n (find factor pairs)
+            match = re.search(r'x\s*\*\s*y\s*=\s*(\d+)', problem_text)
+            if match:
+                n = int(match.group(1))
+                # Find all divisors
+                divisors = []
+                for d in range(1, min(int(math.sqrt(n)) + 1, 1000)):
+                    if n % d == 0:
+                        divisors.append((d, n // d))
+                
+                if divisors:
+                    text_lower = problem_text.lower()
+                    if 'how many' in text_lower:
+                        return (len(divisors), 0.8)
+                    elif 'minimum' in text_lower or 'smallest' in text_lower:
+                        return (min(divisors[0][0], divisors[0][1]), 0.8)
+                    elif 'maximum' in text_lower or 'largest' in text_lower:
+                        return (max(divisors[-1][0], divisors[-1][1]), 0.8)
+            
+            return None
+        except Exception as e:
+            logger.debug(f"Quadratic Diophantine failed: {e}")
             return None
     
     @staticmethod

@@ -139,15 +139,25 @@ Return (answer1, answer2)
 </SCRATCHPAD>
 ```
 
-### Temperature Diversity
+### LLM Configuration
 
-Each attempt uses different temperature for creative variation:
-- **T=0.3**: Deterministic, reliable (Attempt 1)
-- **T=0.6**: Balanced (Attempt 2)
-- **T=0.9**: Exploratory (Attempt 3)
-- **T=1.0**: Maximum diversity (Attempt 4)
+**CRITICAL: All LLM calls use temperature=0.0 for determinism**
 
-This increases probability of finding correct answer without overfitting to first strategy.
+The double-run evaluation format requires deterministic behavior. Using temperature > 0 introduces variance across submissions, causing inconsistent results on the same problem.
+
+**Model Support**:
+- OpenAI API (gpt-4-turbo, gpt-3.5-turbo)
+- Anthropic API (claude-3-sonnet, claude-3-opus)
+- HuggingFace local models (Qwen/Qwen2.5-Math-14B-Instruct)
+
+Configure via environment variables:
+```bash
+export LLM_CLIENT="openai"  # or "anthropic" or "huggingface"
+export LLM_MODEL="gpt-4-turbo"
+export OPENAI_API_KEY="sk-..."
+```
+
+For Kaggle offline mode, use HuggingFace local models (no API key needed).
 
 ---
 

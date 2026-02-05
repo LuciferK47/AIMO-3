@@ -148,20 +148,19 @@ class CandidateGenerator:
     
     def generate(self, problem_text: str, classification: Dict[str, Any]) -> List[Tuple[int, int]]:
         """
-        Generate 3-5 candidate answers.
+        Generate 3-5 candidate answers using SIMPLIFIED 3-STRATEGY PIPELINE.
         
-        CRITICAL INVERSION:
+        CRITICAL SIMPLIFICATION (User's D2 recommendation):
         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        LLM ROLE: Translator (formalize, enumerate, derive)
+        LLM ROLE: Translator (formalize equations, generate code)
         SYMPY ROLE: Solver (compute, verify, decide)
         
         Pipeline:
-        1. SYMBOLIC-FIRST: Direct SymPy (modular, Diophantine)
-        2. LLM TRANSLATION → SYMPY SOLVE (PRIMARY)
-        3. LLM CASE ENUMERATION → SYMPY COMPUTE
-        4. LLM FORMALIZATION → SYMPY EVALUATE
+        1. SYMBOLIC-FIRST: Direct SymPy (modular, Diophantine, combinatorics) - NO LLM
+        2. LLM TRANSLATION → SYMPY SOLVE (PRIMARY PATH for algebra/systems)
+        3. LLM PYTHON GENERATION → SANDBOXED EXECUTION (for enumeration/brute-force)
         
-        LLM NEVER directly solves - only translates.
+        REMOVED: Case enumeration, formalization (over-engineered, low signal)
         """
         candidates = []
         
@@ -190,21 +189,7 @@ class CandidateGenerator:
         except Exception as e:
             logger.debug(f"Translation→solve failed: {e}")
         
-        # STRATEGY 3: LLM CASE ENUMERATION → SYMPY COMPUTE
-        try:
-            case_candidates = self._try_case_enumeration(problem_text, classification)
-            candidates.extend(case_candidates)
-        except Exception as e:
-            logger.debug(f"Case enumeration failed: {e}")
-        
-        # STRATEGY 4: LLM FORMALIZATION → SYMPY EVALUATE
-        try:
-            formal_candidates = self._try_formalization(problem_text, classification)
-            candidates.extend(formal_candidates)
-        except Exception as e:
-            logger.debug(f"Formalization failed: {e}")
-        
-        # STRATEGY 5: LLM PYTHON GENERATION → SANDBOXED EXECUTION (NEW)
+        # STRATEGY 3: LLM PYTHON GENERATION → SANDBOXED EXECUTION
         try:
             python_candidates = self._try_python_execution(problem_text, classification)
             candidates.extend(python_candidates)
@@ -223,7 +208,7 @@ class CandidateGenerator:
     
     def _try_python_execution(self, problem_text: str, classification: Dict[str, Any]) -> List[Tuple[int, int]]:
         """
-        LLM PYTHON GENERATION → SANDBOXED EXECUTION
+        STRATEGY 1: LLM PYTHON GENERATION → SANDBOXED EXECUTION
         
         LLM: "Generate Python code to solve this problem"
         Executor: Safely execute code and extract integer result
@@ -235,24 +220,30 @@ class CandidateGenerator:
         try:
             from safe_executor import safe_execute, extract_integer_from_code
             
-            python_prompt = f"""
-You are a Python code generator for mathematical problem solving.
+            python_prompt = f"""Generate Python code to solve this math problem.
 
-Task: Write Python code to solve this problem. Output the answer in a variable called 'result'.
+CONSTRAINTS:
+- NO imports (you cannot use math, sympy, etc.)
+- Use only: +, -, *, /, //, %, **, abs, min, max, sum, len, range, list, set, dict
+- All loops must iterate at most 10000 times
+- Store final answer in variable 'result' as an integer
+- Answer must be between 0 and 99999 inclusive
 
-Rules:
-- Use only basic Python (loops, arithmetic, lists)
-- Do NOT use imports or eval()
-- Assign final answer to 'result'
-- Code should complete quickly (< 5 seconds)
+TEMPLATE:
+```python
+# Setup
+# ... your code here ...
 
-Problem:
-{problem_text}
+# Final answer (integer 0-99999)
+result = int(...)
+```
 
-Python code:
+PROBLEM: {problem_text}
+
+CODE:
 """
             
-            code = query_llm(python_prompt, max_tokens=300, temperature=0.2)
+            code = query_llm(python_prompt, max_tokens=300, temperature=0.0)
             if code:
                 # Try to extract answer from generated code
                 answer = extract_integer_from_code(code, timeout=3.0)
@@ -267,14 +258,28 @@ Python code:
         return candidates
     
     def _try_symbolic(self, problem_text: str, classification: Dict[str, Any]) -> List[Tuple[int, int]]:
-        """Try pure symbolic solving."""
+        """Try pure symbolic solving with NEW quadratic Diophantine and geometry solvers."""
         candidates = []
         
         try:
-            # For diophantine equations
+            from sympy_solver import DiophantineSolver, GeometrySolver
+            
+            # NEW: Try quadratic Diophantine (D2 recommendation)
+            quad_result = DiophantineSolver.quadratic_diophantine(problem_text)
+            if quad_result:
+                candidates.append(quad_result)
+                logger.info("Quadratic Diophantine solver found solution")
+            
+            # NEW: Try coordinate geometry (D6 recommendation)
+            if classification.get('problem_type') == 'geometry' or 'geometry' in problem_text.lower():
+                geom_result = GeometrySolver.solve_coordinate_geometry(problem_text)
+                if geom_result:
+                    candidates.append(geom_result)
+                    logger.info("Coordinate geometry solver found solution")
+            
+            # EXISTING: Linear Diophantine
             problem_type = classification.get('problem_type', '')
             if problem_type == 'diophantine' or 'diophantine' in problem_text.lower():
-                from sympy_solver import DiophantineSolver
                 import math
                 # Try to extract bounds from problem text (e.g., "1 ≤ x ≤ 100" or "1 <= x <= 10")
                 bounds: Dict[str, Tuple[int, int]] = {}
@@ -410,48 +415,58 @@ Python code:
     
     def _try_equation_extraction(self, problem_text: str, classification: Dict[str, Any]) -> List[Tuple[int, int]]:
         """
-        LLM TRANSLATION → SYMPY SOLVE (PRIMARY PIPELINE) with deterministic JSON extraction.
+        STRATEGY 2: LLM TRANSLATION → SYMPY SOLVE (PRIMARY PIPELINE)
         
         Critical separation:
-        - LLM: Translate natural language → formal equations and constraints (ONLY)
+        - LLM: Translate natural language → formal equations (ONLY)
         - SymPy: Solve equations → numeric answer
         
-        This is NOT a fallback. This is the MAIN path for 30-50% of problems.
-        Deterministic temperature=0.0 to avoid instability across runs.
+        This is the MAIN path for 30-50% of problems.
+        Deterministic temperature=0.0 to avoid instability.
         """
         candidates = []
         
         try:
-            translation_prompt = f"""
-You are a mathematical formalizer. Your ONLY job is to extract equations.
+            translation_prompt = f"""ROLE: You translate math problems to formal equations. You NEVER solve.
 
-TASK: Convert this problem into a complete formal specification.
-
-OUTPUT FORMAT (strict JSON):
-{{
-  "variables": ["x", "y"],
-  "variable_domains": {{"x": "positive_integer", "y": "nonnegative_integer"}},
-  "equations": ["x + y = 10"],
-  "inequalities": ["x >= 1", "y <= 100"],
-  "objective": "find x" | "count solutions" | "find maximum of x+y"
-}}
+INPUT: A math problem in natural language.
+OUTPUT: JSON with equations that SymPy can parse.
 
 RULES:
-1. EVERY variable must have an explicit domain (positive_integer, nonnegative_integer, real)
-2. EVERY constraint mentioned in the problem must appear in equations OR inequalities
-3. The objective must state exactly what to find or count
-4. Do NOT solve. Do NOT compute. Do NOT explain.
+1. Use ONLY variables that appear in the problem (x, y, n, k, etc.)
+2. Each equation must be valid SymPy syntax: use ** for power, not ^
+3. Output EXACTLY one JSON object, nothing else
+4. If the problem asks "how many", your objective should be "count"
+5. If the problem asks "find the value", your objective should be "find"
+
+FORMAT:
+{{
+  "equations": ["x**2 + y**2 = 25", "x + y = 7"],
+  "constraints": ["x > 0", "y > 0", "x integer", "y integer"],
+  "objective": "count" | "find" | "sum" | "max" | "min",
+  "target_variable": "x"
+}}
+
+EXAMPLE:
+Problem: "Find all pairs of positive integers (x,y) such that x² + y² = 25"
+Output:
+{{
+  "equations": ["x**2 + y**2 = 25"],
+  "constraints": ["x > 0", "y > 0"],
+  "objective": "count",
+  "target_variable": null
+}}
 
 PROBLEM:
 {problem_text}
 """
-            response = query_llm_json(translation_prompt, max_tokens=350, temperature=0.0)
+            response = query_llm_json(translation_prompt, max_tokens=300, temperature=0.0)
             equations = []
             if response and isinstance(response.get("equations"), list):
                 equations = [str(e).strip() for e in response["equations"] if str(e).strip()]
 
             if not equations:
-                equations_text = query_llm(translation_prompt, max_tokens=350, temperature=0.0)
+                equations_text = query_llm(translation_prompt, max_tokens=300, temperature=0.0)
                 if equations_text:
                     extractor = EquationExtractor()
                     equations = extractor.extract_equations(equations_text)
@@ -479,162 +494,22 @@ PROBLEM:
             logger.debug(f"Translation→solve pipeline error: {e}")
         
         return candidates
-    
-    def _try_case_enumeration(self, problem_text: str, classification: Dict[str, Any]) -> List[Tuple[int, int]]:
-        """
-        LLM CASE ENUMERATION → SAFE COMPUTE (INTERMEDIATE CASES ONLY)
-        
-        LLM: Identify enumeration variable and range (NOT final answers)
-        Solver: Compute aggregation deterministically when possible
-        
-        Useful for: counting problems, modular arithmetic, optimization
-        """
-        candidates = []
-        
-        try:
-            enumeration_prompt = f"""
-You are a mathematical case lister. You will list INTERMEDIATE values to check, NOT final answers.
-
-TASK: Identify the KEY VALUES or CASES that determine the answer.
-
-OUTPUT FORMAT (strict JSON):
-{{
-  "enumeration_variable": "k",
-  "enumeration_range": {{"min": 1, "max": 100}},
-  "filter_condition": "k is prime",
-  "aggregation": "count" | "sum" | "max" | "min"
-}}
-
-RULES:
-1. The enumeration_variable is what we iterate over
-2. The filter_condition is applied to each value
-3. The aggregation tells how to combine results
-4. Do NOT output final answers
-5. Do NOT compute the aggregation
-
-PROBLEM:
-{problem_text}
-"""
-            response = query_llm_json(enumeration_prompt, max_tokens=220, temperature=0.0)
-            if not response:
-                return candidates
-
-            enum_var = response.get("enumeration_variable")
-            enum_range = response.get("enumeration_range") or {}
-            filter_condition = str(response.get("filter_condition", "")).lower()
-            aggregation = str(response.get("aggregation", "")).lower()
-
-            if not enum_var or not isinstance(enum_range, dict):
-                return candidates
-
-            min_val = enum_range.get("min")
-            max_val = enum_range.get("max")
-            if not isinstance(min_val, int) or not isinstance(max_val, int):
-                return candidates
-
-            # Simple deterministic filters
-            def passes_filter(v: int) -> bool:
-                if not filter_condition:
-                    return True
-                if "prime" in filter_condition:
-                    return SymPySolver.is_prime(v)
-                if "even" in filter_condition:
-                    return v % 2 == 0
-                if "odd" in filter_condition:
-                    return v % 2 == 1
-                match = re.search(r'divisible by (\d+)', filter_condition)
-                if match:
-                    return v % int(match.group(1)) == 0
-                return True
-
-            values = [v for v in range(min_val, max_val + 1) if passes_filter(v)]
-
-            if aggregation == "count":
-                result = len(values)
-            elif aggregation == "sum":
-                result = sum(values)
-            elif aggregation == "max":
-                result = max(values) if values else None
-            elif aggregation == "min":
-                result = min(values) if values else None
-            else:
-                result = None
-
-            if isinstance(result, int) and AnswerValidator.check_range(result):
-                candidates.append((result, 0.6))
-        
-        except Exception as e:
-            logger.debug(f"Case enumeration error: {e}")
-        
-        return candidates
-    
-    def _try_formalization(self, problem_text: str, classification: Dict[str, Any]) -> List[Tuple[int, int]]:
-        """
-        LLM FORMALIZATION → SYMPY EVALUATE
-        
-        LLM: "Convert to a single mathematical expression"
-        SymPy: Evaluate the expression
-        
-        Useful for: combinatorial formulas, closed-form expressions
-        """
-        candidates = []
-        
-        try:
-            formalization_prompt = f"""
-You are a mathematical formalizer, NOT a calculator.
-
-Task: Convert the problem into a single mathematical expression.
-
-Rules:
-- Output ONLY JSON: {{"expression": "<single expression>"}}
-- Use standard variables: x, y, z, n, k, a, b
-- Do NOT solve
-- Do NOT compute answers
-- Do NOT explain
-
-Problem:
-{problem_text}
-"""
-            response = query_llm_json(formalization_prompt, max_tokens=150, temperature=0.0)
-            expression = None
-            if response and isinstance(response.get("expression"), str):
-                expression = response["expression"].strip()
-            if not expression:
-                raw = query_llm(formalization_prompt, max_tokens=150, temperature=0.0)
-                expression = raw.strip() if raw else None
-
-            if expression:
-                try:
-                    result = SymPySolver.evaluate_expression(expression)
-                    if result is not None:
-                        answer = int(result)
-                        if 0 <= answer <= 99999:
-                            candidates.append((answer, 0))
-                            logger.info(f"SymPy evaluated: {answer}")
-                except Exception:
-                    pass
-        
-        except Exception as e:
-            logger.debug(f"Formalization error: {e}")
-        
-        return candidates
 
 
 class AnswerArbitrator:
-    """Verify candidates and select best answer using arbitration."""
+    """REDESIGNED arbitration with hard filters and frequency analysis (Section F2)."""
     
     def __init__(self):
         self.verifier = SelfVerificationLoop()
     
     def arbitrate(self, candidates: List[Tuple[int, int]], problem_text: str) -> Tuple[int, int]:
         """
-        Verify all candidates and return best pair using multi-stage verification pipeline.
+        REDESIGNED ARBITRATION PIPELINE (Section F2):
         
-        Stages:
-        1. HARD CONSTRAINT FILTERING - Range, modular, parity checks
-        2. SYMBOLIC RE-VERIFICATION - Plug back into equations
-        3. CROSS-VALIDATION - Agreement checking across methods
-        4. WEIGHTED VOTE - Confidence-based scoring
+        1. HARD FILTER → reject invalid (not soft scoring)
+        2. FREQUENCY ANALYSIS → count agreement
+        3. EQUATION VERIFICATION → symbolic check (if equations extracted)
+        4. FINAL SELECTION → (best, best) if confident else (best, second)
         """
         if not candidates:
             return (0, 0)
@@ -646,93 +521,90 @@ class AnswerArbitrator:
         if not primary_answers:
             return (0, 0)
 
-        # ========== STAGE 1: HARD CONSTRAINT FILTERING ==========
-        filtered_answers = []
-        for ans in set(primary_answers):
-            # Range check (0-99999)
-            if not AnswerValidator.check_range(ans):
-                logger.debug(f"Answer {ans} failed range check")
+        # ========== STEP 1: HARD FILTER ==========
+        valid = []
+        for ans in primary_answers:
+            # Range check
+            if not (0 <= ans <= 99999):
                 continue
-            # Modular bound check
-            if not AnswerValidator.check_modular_constraint(ans, problem_text):
-                logger.debug(f"Answer {ans} failed modular constraint")
-                # Don't reject - modular constraints can be soft
-            filtered_answers.append(ans)
+            
+            # Modular check: if "remainder" problem, answer must be < modulus
+            modulo = AnswerValidator._extract_modulo(problem_text)
+            if modulo and 'remainder' in problem_text.lower() and ans >= modulo:
+                continue
+            
+            # Parity check (hard fail if explicit constraint)
+            if not AnswerValidator.check_parity(ans, problem_text):
+                continue
+            
+            # Divisibility check
+            if not AnswerValidator.check_divisibility(ans, problem_text):
+                continue
+            
+            valid.append(ans)
         
-        if not filtered_answers:
-            # All candidates filtered - return best from original set anyway
-            logger.warning("All candidates filtered by hard constraints, falling back to original set")
-            filtered_answers = [a for a in set(primary_answers) if AnswerValidator.check_range(a)]
-        
-        if not filtered_answers:
-            logger.warning("No candidates in valid range [0, 99999]")
+        if not valid:
+            logger.warning("All candidates filtered by hard constraints")
             return (0, 0)
 
-        # ========== BUILD PROBLEM ANALYSIS & EQUATIONS ==========
-        # Build problem analysis + equations for verification (cached)
+        # ========== STEP 2: FREQUENCY ANALYSIS ==========
+        answer_counts = Counter(valid)
+        most_common = answer_counts.most_common(2)
+        
+        # ========== STEP 3: EQUATION VERIFICATION ==========
         from cache import get_intermediate_cache
         intermediate_cache = get_intermediate_cache()
-        problem_analysis = intermediate_cache.get_problem_analysis(problem_text)
-        if not problem_analysis:
-            problem_analysis = ProblemParser.extract_problem_subtype(problem_text)
-            intermediate_cache.put_problem_analysis(problem_text, problem_analysis)
-
         equations = intermediate_cache.get_equations(problem_text)
         if equations is None:
             try:
                 equations = EquationExtractor().extract_equations(problem_text)
+                intermediate_cache.put_equations(problem_text, equations)
             except Exception:
                 equations = []
-            intermediate_cache.put_equations(problem_text, equations)
 
-        # ========== STAGE 2 & 3 & 4: VERIFICATION & SCORING ==========
-        scored_candidates = []
-        for ans in filtered_answers:
-            confidence = SelfVerificationLoop.score_candidate_answer(
-                ans, problem_text, problem_analysis, equations
-            )
-            scored_candidates.append((ans, confidence))
-            logger.debug(f"Answer {ans}: confidence={confidence:.3f}")
-
-        if not scored_candidates:
+        # Boost confidence for answers that verify against equations
+        verified = []
+        for ans in set(valid):
+            confidence = 0.5  # Base confidence
+            
+            # Boost for frequency
+            count = answer_counts[ans]
+            confidence += min(0.2, count * 0.1)
+            
+            # Boost for equation verification
+            if equations:
+                verified_any = False
+                for eq in equations:
+                    if SymPySolver.verify_solution(str(eq), 'x', ans):
+                        verified_any = True
+                        break
+                if verified_any:
+                    confidence += 0.2
+                    logger.info(f"Answer {ans} verified against equations")
+            
+            verified.append((ans, confidence))
+        
+        if not verified:
             return (0, 0)
 
-        # Sort by confidence and pick top two unique answers
-        scored_candidates.sort(key=lambda x: x[1], reverse=True)
-        # Arbitration Strategy: Select pair based on confidence
-        # If high confidence on best answer with clear margin: return (best, best) for hedging
-        # Otherwise: return (best, second_best) for diversity
+        # ========== STEP 4: FINAL SELECTION ==========
+        verified.sort(key=lambda x: x[1], reverse=True)
+        best = verified[0][0]
+        best_score = verified[0][1]
         
-        ordered_answers = [ans for ans, _ in scored_candidates]
-        ordered_scores = [score for _, score in scored_candidates]
+        # High confidence + consensus → same answer twice
+        if best_score >= 0.85 and most_common[0][1] >= 2:
+            logger.info(f"High confidence: ({best}, {best}) [score={best_score:.3f}, freq={most_common[0][1]}]")
+            return (best, best)
         
-        if len(ordered_answers) == 0:
-            return (0, 0)
+        # Moderate confidence → diversity
+        if len(verified) >= 2:
+            second = verified[1][0]
+            logger.info(f"Diversity: ({best}, {second}) [scores={best_score:.3f}, {verified[1][1]:.3f}]")
+            return (best, second)
         
-        if len(ordered_answers) == 1:
-            # Only one candidate - return it twice
-            return (ordered_answers[0], ordered_answers[0])
-        
-        # Two or more candidates
-        best_ans = ordered_answers[0]
-        best_score = ordered_scores[0]
-        second_best_ans = ordered_answers[1] if len(ordered_answers) > 1 else best_ans
-        second_score = ordered_scores[1] if len(ordered_answers) > 1 else best_score
-        
-        # Confidence-based hedging strategy
-        # If very high confidence and large margin: bet on same answer twice
-        # Otherwise: diversity bet
-        confidence_threshold = 0.75  # High confidence threshold
-        score_margin_threshold = 0.15  # Margin between best and second-best
-        
-        if best_score >= confidence_threshold and (best_score - second_score) >= score_margin_threshold:
-            # High confidence with clear leader → return same answer twice
-            logger.info(f"High confidence arbitration: ({best_ans}, {best_ans}) [score={best_score:.3f}]")
-            return (best_ans, best_ans)
-        else:
-            # Moderate confidence or close race → diversity strategy
-            logger.info(f"Diversity arbitration: ({best_ans}, {second_best_ans}) [scores={best_score:.3f}, {second_score:.3f}]")
-            return (best_ans, second_best_ans)
+        # Only one candidate → return it twice
+        return (best, best)
  
 
 class StrategyArbiter:

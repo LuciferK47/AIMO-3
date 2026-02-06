@@ -172,6 +172,78 @@ class AnswerValidator:
                 pass
         return True
 
+    @staticmethod
+    def is_impossible(answer: int, problem_text: str) -> bool:
+        """
+        Hard reject impossible answers based on problem constraints.
+        
+        Returns True if answer SHOULD BE REJECTED (impossible), False otherwise.
+        
+        Rules:
+        - If answer is remainder mod m: answer must be < m
+        - If answer is in explicit range: answer must be within range
+        - If parity/divisibility specified: answer must match
+        """
+        problem_lower = problem_text.lower()
+        
+        # Rule 1: Remainder constraint
+        if 'remainder' in problem_lower:
+            match = re.search(r'(?:mod|modulo|divided by)\s+(\d+)', problem_lower)
+            if match:
+                try:
+                    modulus = int(match.group(1))
+                    if answer >= modulus:
+                        logger.debug(f"Rejecting {answer}: remainder >= {modulus}")
+                        return True
+                except Exception:
+                    pass
+        
+        # Rule 2: Explicit range constraints
+        range_patterns = [
+            (r'less than\s+(\d+)', lambda v, n: v >= int(n)),  # Return True if should reject
+            (r'greater than\s+(\d+)', lambda v, n: v <= int(n)),
+            (r'at most\s+(\d+)', lambda v, n: v > int(n)),
+            (r'at least\s+(\d+)', lambda v, n: v < int(n)),
+        ]
+        
+        for pattern, reject_fn in range_patterns:
+            match = re.search(pattern, problem_lower)
+            if match:
+                try:
+                    should_reject = reject_fn(answer, match.group(1))
+                    if should_reject:
+                        logger.debug(f"Rejecting {answer}: violates {pattern}")
+                        return True
+                except Exception:
+                    pass
+        
+        # Rule 3: Parity constraint
+        if 'even' in problem_lower and 'answer' in problem_lower:
+            if answer % 2 != 0:
+                logger.debug(f"Rejecting {answer}: answer must be even")
+                return True
+        
+        if 'odd' in problem_lower and 'answer' in problem_lower:
+            if answer % 2 == 0:
+                logger.debug(f"Rejecting {answer}: answer must be odd")
+                return True
+        
+        # Rule 4: Prime constraint
+        if 'prime' in problem_lower:
+            from sympy import isprime
+            if not isprime(answer):
+                logger.debug(f"Rejecting {answer}: answer must be prime")
+                return True
+        
+        # Rule 5: Perfect square constraint
+        if 'perfect square' in problem_lower or 'square number' in problem_lower:
+            sqrt_val = int(answer ** 0.5)
+            if sqrt_val * sqrt_val != answer:
+                logger.debug(f"Rejecting {answer}: answer must be perfect square")
+                return True
+        
+        return False  # Answer is possible
+
 
 # ============================================================================
 # DETERMINISTIC VERIFIER

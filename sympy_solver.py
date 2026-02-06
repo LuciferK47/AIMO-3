@@ -353,8 +353,7 @@ class SymPySolver:
             if power_match:
                 base = int(power_match.group(1))
                 exp = int(power_match.group(2))
-
-                    result = NumberTheorySolver.modular_power(base, exp, modulo)
+                result = NumberTheorySolver.modular_power(base, exp, modulo)
                 
                 if 0 <= result <= 99999:
                     return (result, 0.85)
@@ -377,7 +376,7 @@ class SymPySolver:
                 m_red = m // g
                 
                 try:
-                        a_inv = mod_inverse(a_red, m_red)
+                    a_inv = mod_inverse(a_red, m_red)
                     x = (a_inv * b_red) % m_red
                     if 0 <= x <= 99999:
                         return (x, 0.8)

@@ -266,7 +266,14 @@ CODE:
         candidates = []
         
         try:
-            from sympy_solver import DiophantineSolver, GeometrySolver
+            from sympy_solver import DiophantineSolver, GeometrySolver, NumberTheoryAdvanced
+            
+            # NEW: Try Chinese Remainder Theorem for congruence systems (D1 recommendation)
+            if 'congruence' in problem_text.lower() or 'mod' in problem_text.lower():
+                crt_result = NumberTheoryAdvanced.solve_congruence_system(problem_text)
+                if crt_result:
+                    candidates.append(crt_result)
+                    logger.info("CRT solver found solution")
             
             # NEW: Try quadratic Diophantine (D2 recommendation)
             quad_result = DiophantineSolver.quadratic_diophantine(problem_text)

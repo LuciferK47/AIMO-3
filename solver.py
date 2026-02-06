@@ -524,6 +524,11 @@ class AnswerArbitrator:
             if not (0 <= ans <= 99999):
                 continue
             
+            # NEW: Use is_impossible hard gate (D3 recommendation)
+            if AnswerValidator.is_impossible(ans, problem_text):
+                logger.debug(f"Rejecting impossible answer: {ans}")
+                continue
+            
             # Modular check: if "remainder" problem, answer must be < modulus
             modulo = AnswerValidator._extract_modulo(problem_text)
             if modulo and 'remainder' in problem_text.lower() and ans >= modulo:

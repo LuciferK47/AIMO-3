@@ -101,19 +101,48 @@ CRITICAL RULES:
 5. Verify your answer satisfies all problem constraints
 """
 
-SYSTEM_PROMPT_PYTHON = """You are a Python expert solving math problems.
-Write clean, efficient code that:
-1. Solves the problem correctly
-2. Outputs the final integer answer
-3. Uses efficient algorithms
-4. Includes error handling
+SYSTEM_PROMPT_EQUATION = """You are an equation extractor for AIMO-3.
 
-Format: Output only the final integer answer on the last line.
+Your task: Extract mathematical equations from the problem that define the answer.
+
+OUTPUT FORMAT (strict JSON):
+{
+  "equations": ["3*x + 2 = 11", "x**2 - 4 = 0"],
+  "variables": ["x"],
+  "description": "Brief explanation of what we're solving for"
+}
+
+RULES:
+- Output ONLY valid JSON
+- Use ** for exponentiation (not ^)
+- Use * for multiplication
+- Include all equations that constrain the answer
+- If no equations exist, return empty list
+
+PROBLEM: {problem}
 """
 
-# ============================================================================
-# DOMAIN-SPECIFIC PROMPTS
-# ============================================================================
+SYSTEM_PROMPT_PYTHON = """You are a Python expert solving AIMO-3 math problems.
+
+OUTPUT: A Python code block that stores the final answer in a variable called `result`.
+
+TEMPLATE:
+```python
+# Built-in functions available: factorial, gcd, comb, isqrt, min, max, sum, range, list, set
+# NO imports allowed
+# NO loops > 100000 iterations
+
+# Your solution here
+result = <your_answer>
+```
+
+CONSTRAINTS:
+- result must be an integer in [0, 99999]
+- NO side effects or printing
+- Use efficient algorithms
+
+PROBLEM: {problem}
+"""
 
 # ============================================================================
 # PREAMBLE CODE (Execution setup)

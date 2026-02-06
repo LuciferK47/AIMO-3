@@ -84,6 +84,7 @@ def time_limit(seconds: float):
         yield
     except KeyboardInterrupt:
         if timed_out["flag"]:
+            logger.warning(f"Operation exceeded {seconds}s time limit")
             raise TimeoutError(f"Operation exceeded {seconds}s time limit")
         raise
     finally:
@@ -376,21 +377,27 @@ def query_llm(prompt: str, max_tokens: int = 500, temperature: float = None) -> 
 
 
 def parse_json_response(text: str) -> Optional[Dict[str, Any]]:
-    """Parse the first valid JSON object from text."""
+    """Parse the first valid JSON object from text with minimal robustness fixes."""
     if not text:
         return None
     try:
+        # Prefer fenced JSON blocks if present
+        fence_match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if fence_match:
+            return json.loads(fence_match.group(1))
+
         start = text.find('{')
         end = text.rfind('}')
         if start == -1 or end == -1 or end <= start:
             return None
-        return json.loads(text[start:end + 1])
+        payload = text[start:end + 1]
+        return json.loads(payload)
     except Exception:
         return None
 
 
-def query_llm_json(prompt: str, max_tokens: int = 300, temperature: float = 0.1) -> Optional[Dict[str, Any]]:
-    """Query LLM and parse a JSON response."""
+def query_llm_json(prompt: str, max_tokens: int = 300, temperature: float = 0.0) -> Optional[Dict[str, Any]]:
+    """Query LLM and parse a JSON response (deterministic)."""
     response = query_llm(prompt, max_tokens=max_tokens, temperature=temperature)
     return parse_json_response(response)
 

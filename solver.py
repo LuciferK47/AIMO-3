@@ -30,11 +30,12 @@ import logging
 import re
 import time
 from typing import List, Tuple, Optional, Dict, Any, Set
+from collections import Counter
 
 from config import *
 from parsing import ProblemParser
 from utils import preprocess_problem_text, query_llm, query_llm_json, ensure_determinism, time_limit
-from sympy_solver import SymPySolver, EquationExtractor, DiophantineSolver
+from sympy_solver import SymPySolver, EquationExtractor, DiophantineSolver, NumberTheorySolver
 from validation import AnswerValidator, SelfVerificationLoop
 
 logger = logging.getLogger(__name__)
@@ -220,22 +221,25 @@ class CandidateGenerator:
         try:
             from safe_executor import safe_execute, extract_integer_from_code
             
-            python_prompt = f"""Generate Python code to solve this math problem.
+            python_prompt = f"""Write Python code to solve this problem.
 
-CONSTRAINTS:
-- NO imports (you cannot use math, sympy, etc.)
-- Use only: +, -, *, /, //, %, **, abs, min, max, sum, len, range, list, set, dict
-- All loops must iterate at most 10000 times
-- Store final answer in variable 'result' as an integer
-- Answer must be between 0 and 99999 inclusive
+ALLOWED:
+- Basic operations: +, -, *, /, //, %, **
+- Built-ins: abs, min, max, sum, len, range, list, set, dict, sorted
+- Math: factorial, gcd, comb, isqrt (already available)
+- Loops: for, while (max 100000 iterations)
+- Conditionals: if, elif, else
 
 TEMPLATE:
 ```python
-# Setup
-# ... your code here ...
+# The functions gcd, factorial, comb, isqrt are already available
+# DO NOT import anything
 
-# Final answer (integer 0-99999)
-result = int(...)
+# Your solution here
+# ...
+
+# Store final answer as integer
+result = <your_answer>
 ```
 
 PROBLEM: {problem_text}
@@ -427,43 +431,28 @@ CODE:
         candidates = []
         
         try:
-            translation_prompt = f"""ROLE: You translate math problems to formal equations. You NEVER solve.
+                        translation_prompt = f"""You are a math equation extractor. Extract ONLY the mathematical equations.
 
-INPUT: A math problem in natural language.
-OUTPUT: JSON with equations that SymPy can parse.
+STRICT OUTPUT FORMAT:
+```json
+{{"equations": ["equation1", "equation2"], "variables": ["x", "y"]}}
+```
 
 RULES:
-1. Use ONLY variables that appear in the problem (x, y, n, k, etc.)
-2. Each equation must be valid SymPy syntax: use ** for power, not ^
-3. Output EXACTLY one JSON object, nothing else
-4. If the problem asks "how many", your objective should be "count"
-5. If the problem asks "find the value", your objective should be "find"
+- Use ** for exponents (NOT ^)
+- Use explicit * for multiplication: 2*x not 2x
+- Each equation must contain exactly one = sign
+- List ALL variables used
+- NO prose, NO explanation, ONLY the JSON block above
 
-FORMAT:
-{{
-  "equations": ["x**2 + y**2 = 25", "x + y = 7"],
-  "constraints": ["x > 0", "y > 0", "x integer", "y integer"],
-  "objective": "count" | "find" | "sum" | "max" | "min",
-  "target_variable": "x"
-}}
+PROBLEM: {problem_text}
 
-EXAMPLE:
-Problem: "Find all pairs of positive integers (x,y) such that x² + y² = 25"
-Output:
-{{
-  "equations": ["x**2 + y**2 = 25"],
-  "constraints": ["x > 0", "y > 0"],
-  "objective": "count",
-  "target_variable": null
-}}
-
-PROBLEM:
-{problem_text}
+JSON:
 """
             response = query_llm_json(translation_prompt, max_tokens=300, temperature=0.0)
             equations = []
             if response and isinstance(response.get("equations"), list):
-                equations = [str(e).strip() for e in response["equations"] if str(e).strip()]
+                equations = [EquationExtractor.normalize_expression(str(e).strip()) for e in response["equations"] if str(e).strip()]
 
             if not equations:
                 equations_text = query_llm(translation_prompt, max_tokens=300, temperature=0.0)
@@ -514,16 +503,23 @@ class AnswerArbitrator:
         if not candidates:
             return (0, 0)
 
-        # Extract primary answers
-        primary_answers = [c[0] for c in candidates if isinstance(c, tuple) and len(c) >= 1]
-        primary_answers = [a for a in primary_answers if isinstance(a, int)]
+        # Extract (answer, confidence) pairs
+        extracted = []
+        for c in candidates:
+            if not isinstance(c, tuple) or len(c) < 1:
+                continue
+            ans = c[0]
+            conf = c[1] if len(c) > 1 and isinstance(c[1], (int, float)) else 0.5
+            if isinstance(ans, int):
+                extracted.append((ans, float(conf)))
 
-        if not primary_answers:
+        if not extracted:
             return (0, 0)
 
         # ========== STEP 1: HARD FILTER ==========
         valid = []
-        for ans in primary_answers:
+        problem_lower = problem_text.lower()
+        for ans, conf in extracted:
             # Range check
             if not (0 <= ans <= 99999):
                 continue
@@ -540,17 +536,29 @@ class AnswerArbitrator:
             # Divisibility check
             if not AnswerValidator.check_divisibility(ans, problem_text):
                 continue
-            
-            valid.append(ans)
+
+            # Prime check (only if explicitly requested)
+            if 'prime' in problem_lower and 'find' in problem_lower:
+                if not NumberTheorySolver.is_prime(ans):
+                    continue
+
+            # Perfect square check
+            if 'perfect square' in problem_lower or 'square number' in problem_lower:
+                root = int(ans ** 0.5)
+                if root * root != ans:
+                    continue
+            valid.append((ans, conf))
         
         if not valid:
             logger.warning("All candidates filtered by hard constraints")
             return (0, 0)
 
-        # ========== STEP 2: FREQUENCY ANALYSIS ==========
-        answer_counts = Counter(valid)
-        most_common = answer_counts.most_common(2)
-        
+        # ========== STEP 2: WEIGHTED FREQUENCY ANALYSIS ==========
+        weighted_counts: Dict[int, float] = {}
+        for ans, conf in valid:
+            weighted_counts[ans] = weighted_counts.get(ans, 0.0) + conf
+        most_common = sorted(weighted_counts.items(), key=lambda x: x[1], reverse=True)
+
         # ========== STEP 3: EQUATION VERIFICATION ==========
         from cache import get_intermediate_cache
         intermediate_cache = get_intermediate_cache()
@@ -562,26 +570,26 @@ class AnswerArbitrator:
             except Exception:
                 equations = []
 
-        # Boost confidence for answers that verify against equations
+        # Hard gate: if equations exist, answer must satisfy at least one
+        def verify_against_equations(answer: int, eqs: List[str]) -> bool:
+            if not eqs:
+                return True
+            candidate_vars = ['x', 'y', 'n', 'k', 'm', 'a', 'b', 'c']
+            for eq in eqs:
+                eq_str = str(eq)
+                for var in candidate_vars:
+                    if SymPySolver.verify_solution(eq_str, var, answer):
+                        return True
+            return False
+
         verified = []
-        for ans in set(valid):
-            confidence = 0.5  # Base confidence
-            
-            # Boost for frequency
-            count = answer_counts[ans]
-            confidence += min(0.2, count * 0.1)
-            
-            # Boost for equation verification
-            if equations:
-                verified_any = False
-                for eq in equations:
-                    if SymPySolver.verify_solution(str(eq), 'x', ans):
-                        verified_any = True
-                        break
-                if verified_any:
-                    confidence += 0.2
-                    logger.info(f"Answer {ans} verified against equations")
-            
+        for ans, conf in valid:
+            if equations and not verify_against_equations(ans, equations):
+                continue
+
+            confidence = conf
+            # Boost for weighted frequency
+            confidence += min(0.2, weighted_counts.get(ans, 0.0) * 0.1)
             verified.append((ans, confidence))
         
         if not verified:
@@ -593,8 +601,8 @@ class AnswerArbitrator:
         best_score = verified[0][1]
         
         # High confidence + consensus → same answer twice
-        if best_score >= 0.85 and most_common[0][1] >= 2:
-            logger.info(f"High confidence: ({best}, {best}) [score={best_score:.3f}, freq={most_common[0][1]}]")
+        if best_score >= 0.70 and most_common and most_common[0][1] >= 2:
+            logger.info(f"High confidence: ({best}, {best}) [score={best_score:.3f}, weight={most_common[0][1]:.2f}]")
             return (best, best)
         
         # Moderate confidence → diversity
@@ -614,10 +622,10 @@ class StrategyArbiter:
         self.timeout = timeout
         self.start_time = None
         self.time_per_stage = {
-            'parse': 0.5,
-            'classify': 0.2,
-            'generate': 15.0,
-            'verify': 5.0,
+            'parse': TIME_BUDGET_PARSE,
+            'classify': TIME_BUDGET_CLASSIFY,
+            'generate': TIME_BUDGET_GENERATE,
+            'verify': TIME_BUDGET_VERIFY,
             'arbitrate': 1.0,
         }
     
@@ -638,7 +646,11 @@ class StrategyArbiter:
             # STAGE 1: PARSE & CLASSIFY (0.5s max)
             logger.info("STAGE 1: Parsing and classifying...")
             try:
-                with time_limit(self.time_per_stage['parse']):
+                remaining_time = self.timeout - (time.time() - self.start_time)
+                if remaining_time <= 0:
+                    logger.warning("Timeout before parse/classify")
+                    return (0, 0)
+                with time_limit(min(remaining_time, self.time_per_stage['parse'])):
                     problem_text = preprocess_problem_text(problem_text)
                     classification = ProblemClassifier.classify(problem_text)
                     logger.info(f"Classification: {classification['problem_type']}")
@@ -653,6 +665,9 @@ class StrategyArbiter:
             logger.info("STAGE 2: Generating candidates...")
             try:
                 remaining_time = self.timeout - (time.time() - self.start_time)
+                if remaining_time <= 0:
+                    logger.warning("Timeout before candidate generation")
+                    return (0, 0)
                 gen_timeout = min(remaining_time, self.time_per_stage['generate'])
                 
                 with time_limit(gen_timeout):
@@ -674,6 +689,9 @@ class StrategyArbiter:
             logger.info("STAGE 3-4: Verifying and arbitrating...")
             try:
                 remaining_time = self.timeout - (time.time() - self.start_time)
+                if remaining_time <= 0:
+                    logger.warning("Timeout before verification/arbitration")
+                    return (0, 0)
                 arb_timeout = min(remaining_time, self.time_per_stage['verify'] + self.time_per_stage['arbitrate'])
                 
                 with time_limit(arb_timeout):

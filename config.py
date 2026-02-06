@@ -74,7 +74,7 @@ MAX_LLM_CALLS_PER_PROBLEM = 6   # Total LLM API calls: 2 per strategy × 3 strat
 # Time budgets per stage
 TIME_BUDGET_PARSE = 0.5         # seconds
 TIME_BUDGET_CLASSIFY = 0.2      # seconds
-TIME_BUDGET_GENERATE = 15.0     # seconds (main work)
+TIME_BUDGET_GENERATE = 12.0     # seconds (main work)
 TIME_BUDGET_VERIFY = 3.0        # seconds
 TIME_BUDGET_ARBITRATE = 1.0     # seconds
 
@@ -114,56 +114,6 @@ Format: Output only the final integer answer on the last line.
 # ============================================================================
 # DOMAIN-SPECIFIC PROMPTS
 # ============================================================================
-
-ALGEBRAIC_DECOMPOSITION_PROMPT = """Solve this algebra problem step-by-step:
-1. Identify variables and unknowns
-2. Write all equations/constraints
-3. Simplify each equation
-4. Solve the system
-5. Verify the solution satisfies all constraints
-6. State the final integer answer
-
-Problem: {problem}
-
-SOLUTION:"""
-
-NUMBER_THEORY_DECOMPOSITION_PROMPT = """Solve this number theory problem:
-1. Identify what we're looking for (count, value, property)
-2. Apply relevant theorems (Chinese Remainder, Fermat's Little, etc.)
-3. Use modular arithmetic where applicable
-4. Break into cases if needed
-5. Count or compute the final answer
-
-Problem: {problem}
-
-SOLUTION:"""
-
-GEOMETRY_DECOMPOSITION_PROMPT = """Solve this geometry problem:
-1. Set up a coordinate system if helpful
-2. Identify key distances/angles
-3. Use distance formula, law of cosines, etc.
-4. Solve for the target quantity
-5. Verify using alternative method if possible
-
-Problem: {problem}
-
-SOLUTION:"""
-
-# ============================================================================
-# GEOMETRY HINTS
-# ============================================================================
-
-GEOMETRY_NUMERIC_PROMPT = """For this geometry problem, assume convenient coordinates and compute numerically.
-
-Problem: {problem}
-
-Use coordinates like:
-- Unit circle or simple fractions for angles
-- Integer or simple decimal coordinates for points
-- Standard orientations for shapes
-
-Compute the final numeric answer step-by-step.
-Final answer (integer): """
 
 # ============================================================================
 # PREAMBLE CODE (Execution setup)

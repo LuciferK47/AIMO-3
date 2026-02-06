@@ -349,22 +349,12 @@ class SymPySolver:
             modulo = int(mod_match.group(1))
             
             # Pattern 1: Power modulo (a^b mod m)
-            power_match = re.search(r'(\d+)\s*\^\s*(\d+)', problem_text)
+            power_match = re.search(r'(\d+)\s*(?:\^|\*\*)\s*(\d+)', problem_text)
             if power_match:
                 base = int(power_match.group(1))
                 exp = int(power_match.group(2))
-                
-                # Optimize using Fermat/Euler
-                # If modulo is prime and gcd(base, modulo) = 1: a^(p-1) ≡ 1 (mod p)
-                if NumberTheorySolver.isprime(modulo):
-                    # Use Fermat's Little Theorem: a^(p-1) ≡ 1 (mod p)
-                    reduced_exp = exp % (modulo - 1)
-                    result = pow(base, reduced_exp, modulo)
-                else:
-                    # Use Euler's theorem: a^φ(n) ≡ 1 (mod n) if gcd(a,n)=1
-                    phi_n = NumberTheorySolver.euler_totient(modulo)
-                    reduced_exp = exp % phi_n
-                    result = pow(base, reduced_exp, modulo)
+
+                    result = NumberTheorySolver.modular_power(base, exp, modulo)
                 
                 if 0 <= result <= 99999:
                     return (result, 0.85)
@@ -387,7 +377,7 @@ class SymPySolver:
                 m_red = m // g
                 
                 try:
-                    a_inv = mod_inverse(a_red, m_red)
+                        a_inv = mod_inverse(a_red, m_red)
                     x = (a_inv * b_red) % m_red
                     if 0 <= x <= 99999:
                         return (x, 0.8)
@@ -662,6 +652,24 @@ class NumberTheorySolver:
             return None
 
     @staticmethod
+    def modular_power(base: int, exp: int, mod: int) -> int:
+        """
+        Compute base^exp mod mod efficiently.
+        Uses Fermat/Euler when applicable.
+        """
+        if mod == 1:
+            return 0
+        g = NumberTheorySolver.compute_gcd(base, mod)
+        if NumberTheorySolver.is_prime(mod) and g == 1:
+            reduced_exp = exp % (mod - 1)
+            return pow(base, reduced_exp, mod)
+        phi_n = NumberTheorySolver.euler_totient(mod)
+        if phi_n is not None and g == 1:
+            reduced_exp = exp % phi_n
+            return pow(base, reduced_exp, mod)
+        return pow(base, exp, mod)
+
+    @staticmethod
     def euler_totient(n: int) -> Optional[int]:
         """Compute Euler's totient function φ(n)."""
         if not SYMPY_AVAILABLE:
@@ -754,20 +762,40 @@ class GeometrySolver:
         try:
             text_lower = problem_text.lower()
             
+            coords = GeometrySolver.extract_coordinates(problem_text)
+
             # Pattern 1: Triangle with coordinates → area
-            coords = re.findall(r'\((\-?\d+),\s*(\-?\d+)\)', problem_text)
             if len(coords) >= 3 and ('area' in text_lower or 'triangle' in text_lower):
-                x1, y1 = int(coords[0][0]), int(coords[0][1])
-                x2, y2 = int(coords[1][0]), int(coords[1][1])
-                x3, y3 = int(coords[2][0]), int(coords[2][1])
+                x1, y1 = coords[0]
+                x2, y2 = coords[1]
+                x3, y3 = coords[2]
                 
                 area = abs((x1*(y2-y3) + x2*(y3-y1) + x3*(y1-y2)) / 2.0)
                 return (int(area), 0.8)
+
+            # Pattern 1b: Angle at middle point (A-B-C)
+            if len(coords) >= 3 and 'angle' in text_lower:
+                ax, ay = coords[0]
+                bx, by = coords[1]
+                cx, cy = coords[2]
+
+                v1x, v1y = ax - bx, ay - by
+                v2x, v2y = cx - bx, cy - by
+                dot = v1x * v2x + v1y * v2y
+                mag1 = math.sqrt(v1x * v1x + v1y * v1y)
+                mag2 = math.sqrt(v2x * v2x + v2y * v2y)
+                if mag1 > 0 and mag2 > 0:
+                    cos_theta = max(-1.0, min(1.0, dot / (mag1 * mag2)))
+                    angle_rad = math.acos(cos_theta)
+                    angle_deg = angle_rad * 180.0 / math.pi
+                    if 'degree' in text_lower:
+                        return (int(round(angle_deg)), 0.75)
+                    return (int(round(angle_rad)), 0.7)
             
             # Pattern 2: Distance between two points
             if len(coords) == 2 and 'distance' in text_lower:
-                x1, y1 = int(coords[0][0]), int(coords[0][1])
-                x2, y2 = int(coords[1][0]), int(coords[1][1])
+                x1, y1 = coords[0]
+                x2, y2 = coords[1]
                 
                 dist_sq = (x2-x1)**2 + (y2-y1)**2
                 dist = math.sqrt(dist_sq)
@@ -780,8 +808,8 @@ class GeometrySolver:
             
             # Pattern 3: Circle radius given center and point
             if 'circle' in text_lower and 'radius' in text_lower and len(coords) >= 2:
-                x1, y1 = int(coords[0][0]), int(coords[0][1])  # center
-                x2, y2 = int(coords[1][0]), int(coords[1][1])  # point on circle
+                x1, y1 = coords[0]  # center
+                x2, y2 = coords[1]  # point on circle
                 
                 radius_sq = (x2-x1)**2 + (y2-y1)**2
                 radius = math.sqrt(radius_sq)
@@ -792,6 +820,24 @@ class GeometrySolver:
         except Exception as e:
             logger.debug(f"Coordinate geometry failed: {e}")
             return None
+
+    @staticmethod
+    def extract_coordinates(problem_text: str) -> List[Tuple[float, float]]:
+        """
+        Extract coordinates from various formats:
+        - (3, 4), (3,4), (3.5, 4.2)
+        - A = (3, 4)
+        """
+        coords = []
+        pattern = r'\((\-?\d+(?:\.\d+)?),\s*(\-?\d+(?:\.\d+)?)\)'
+        for match in re.finditer(pattern, problem_text):
+            try:
+                x = float(match.group(1))
+                y = float(match.group(2))
+                coords.append((x, y))
+            except Exception:
+                continue
+        return coords
     
     @staticmethod
     def distance_2d(x1: float, y1: float, x2: float, y2: float) -> float:
@@ -914,16 +960,7 @@ class DiophantineSolver:
             
             if match:
                 n = int(match.group(1))
-                # Bounded search for x² + y² = n
-                solutions = []
-                limit = min(int(math.sqrt(n)) + 1, 1000)
-                for x in range(limit):
-                    remainder = n - x*x
-                    if remainder < 0:
-                        break
-                    y = int(math.sqrt(remainder))
-                    if y*y == remainder:
-                        solutions.append((x, y))
+                solutions = DiophantineSolver.solve_sum_of_two_squares(n)
                 
                 if solutions:
                     # Check what the problem wants
@@ -961,6 +998,34 @@ class DiophantineSolver:
         except Exception as e:
             logger.debug(f"Quadratic Diophantine failed: {e}")
             return None
+
+    @staticmethod
+    def solve_sum_of_two_squares(n: int) -> List[Tuple[int, int]]:
+        """
+        Find all (x, y) with x² + y² = n.
+        Uses Fermat's theorem: n is sum of two squares iff
+        no prime p ≡ 3 (mod 4) appears with odd exponent.
+        """
+        if n < 0:
+            return []
+        try:
+            factors = NumberTheorySolver.prime_factorization(n)
+            for p, exp in factors.items():
+                if p % 4 == 3 and exp % 2 == 1:
+                    return []
+        except Exception:
+            pass
+
+        solutions = []
+        limit = int(math.sqrt(n)) + 1
+        for x in range(0, limit):
+            remainder = n - x * x
+            if remainder < 0:
+                break
+            y = int(math.isqrt(remainder))
+            if y * y == remainder:
+                solutions.append((x, y))
+        return solutions
     
     @staticmethod
     def modular_congruence(a: int, b: int, m: int) -> Optional[int]:
@@ -1041,23 +1106,26 @@ class EquationExtractor:
         Looks for = signs, mathematical expressions.
         """
         equations = []
-        
-        # Find patterns like "x = ...", "x^2 + y = 5", etc.
-        # Pattern: variable(s) = expression
+
+        # LaTeX-aware equation patterns
         patterns = [
-            r'([a-zA-Z_]\w*)\s*=\s*([^,\.;]+)',  # x = expression
-            r'([a-zA-Z_]\w*)\s*\+\s*([a-zA-Z_]\w*)\s*=\s*([^,\.;]+)',  # x + y = expression
+            r'\\\[([^\\]+)\\\]',   # \[ ... \]
+            r'\$([^$]+)\$',            # $ ... $
+            r'([a-zA-Z_]\w*)\s*=\s*([^,\.;]+)',
+            r'([a-zA-Z_]\w*)\s*\+\s*([a-zA-Z_]\w*)\s*=\s*([^,\.;]+)',
         ]
-        
+
         for pattern in patterns:
-            matches = re.finditer(pattern, text)
-            for match in matches:
+            for match in re.finditer(pattern, text):
                 eq = match.group(0).strip()
-                # Clean up
+                # If using capture group (LaTeX), take group(1)
+                if match.lastindex:
+                    eq = match.group(match.lastindex).strip()
                 eq = eq.replace('"', '').replace('"', '').strip()
-                if eq and len(eq) > 2:
+                eq = EquationExtractor.normalize_expression(eq)
+                if eq and '=' in eq and len(eq) > 2:
                     equations.append(eq)
-        
+
         return equations
     
     @staticmethod

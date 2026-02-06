@@ -33,7 +33,6 @@ from typing import List, Tuple, Optional, Dict, Any, Set
 from collections import Counter
 
 from config import *
-from parsing import ProblemParser
 from utils import preprocess_problem_text, query_llm, query_llm_json, ensure_determinism, time_limit
 from sympy_solver import SymPySolver, EquationExtractor, DiophantineSolver, NumberTheorySolver
 from validation import AnswerValidator, SelfVerificationLoop
@@ -47,24 +46,25 @@ class ProblemClassifier:
     @staticmethod
     def classify(problem_text: str) -> Dict[str, Any]:
         """
-        Classify problem and return routing hints.
+        Classify problem and return routing hints + extraction metadata.
         
         Returns:
             {
-                'problem_type': str,  # 'modular', 'combinatorics', 'diophantine', 'geometry', 'optimization', 'general'
+                'problem_type': str,
                 'keywords': List[str],
                 'allows_symbolic': bool,
                 'has_equations': bool,
                 'is_modular': bool,
                 'is_counting': bool,
                 'is_geometry': bool,
-                'difficulty_estimate': float,  # 0-1
+                'difficulty_estimate': float,
+                'modulo': Optional[int],
+                'ranges': Dict[str, tuple],
+                'has_constraints': bool,
             }
         """
         text_lower = problem_text.lower()
         
-        # Keyword detection
-        keywords = []
         classification = {
             'problem_type': 'general',
             'keywords': [],
@@ -74,6 +74,9 @@ class ProblemClassifier:
             'is_counting': False,
             'is_geometry': False,
             'difficulty_estimate': 0.5,
+            'modulo': ProblemClassifier.extract_modulo(problem_text),
+            'ranges': ProblemClassifier.extract_ranges(problem_text),
+            'has_constraints': ProblemClassifier.has_constraints(problem_text),
         }
         
         # MULTI-LABEL CLASSIFICATION (not mutually exclusive)
@@ -81,7 +84,7 @@ class ProblemClassifier:
         if any(w in text_lower for w in ['mod', 'remainder', 'divisible', 'congruence', 'modular']):
             classification['is_modular'] = True
             classification['allows_symbolic'] = True
-            keywords.extend(['modular', 'arithmetic'])
+            classification['keywords'].extend(['modular', 'arithmetic'])
             if not classification['problem_type']:
                 classification['problem_type'] = 'modular'
         
@@ -89,14 +92,14 @@ class ProblemClassifier:
         if any(w in text_lower for w in ['how many', 'count', 'combinations', 'permutations', 'ways', 'arrangements', 'sequences']):
             classification['is_counting'] = True
             classification['allows_symbolic'] = True
-            keywords.extend(['counting', 'combinatorics'])
+            classification['keywords'].extend(['counting', 'combinatorics'])
             if not classification['problem_type']:
                 classification['problem_type'] = 'combinatorics'
         
         # Diophantine / Number Theory
         if any(w in text_lower for w in ['integer solutions', 'find all integers', 'diophantine', 'number of pairs', 'pairs (', 'positive integers']):
             classification['allows_symbolic'] = True
-            keywords.extend(['number_theory', 'diophantine'])
+            classification['keywords'].extend(['number_theory', 'diophantine'])
             if not classification['problem_type']:
                 classification['problem_type'] = 'diophantine'
         
@@ -106,22 +109,20 @@ class ProblemClassifier:
             # Geometry without diagrams is harder for SymPy
             if classification['is_geometry'] and not classification['is_modular']:
                 classification['allows_symbolic'] = False
-            keywords.extend(['geometry'])
+            classification['keywords'].extend(['geometry'])
             if not classification['problem_type']:
                 classification['problem_type'] = 'geometry'
         
         # Optimization
         if any(w in text_lower for w in ['maximum', 'minimum', 'maximize', 'minimize', 'least', 'greatest', 'optimal']):
             classification['allows_symbolic'] = True
-            keywords.extend(['optimization'])
+            classification['keywords'].extend(['optimization'])
             if not classification['problem_type']:
                 classification['problem_type'] = 'optimization'
         
         # EQUATIONS / ALGEBRA
         if any(w in text_lower for w in ['equation', 'solve', '=', 'satisfy', 'satisfy']):
             classification['has_equations'] = True
-        
-        classification['keywords'] = keywords
         
         # Difficulty estimate based on keywords
         hard_keywords = ['diophantine', 'complex', 'involving', 'system']
@@ -138,6 +139,106 @@ class ProblemClassifier:
         classification['difficulty_estimate'] = difficulty
         
         return classification
+
+    @staticmethod
+    def clean_latex(text: str) -> str:
+        """Remove or normalize LaTeX markup for LLM processing."""
+        if not text:
+            return text
+        
+        try:
+            # Convert common math environments to text
+            text = re.sub(r'\$\$(.+?)\$\$', r'\1', text, flags=re.DOTALL)
+            text = re.sub(r'\$(.+?)\$', r'\1', text)
+            text = re.sub(r'\\left\(', '(', text)
+            text = re.sub(r'\\right\)', ')', text)
+            text = re.sub(r'\\left\[', '[', text)
+            text = re.sub(r'\\right\]', ']', text)
+            text = re.sub(r'\\left\\{', '{', text)
+            text = re.sub(r'\\right\\}', '}', text)
+            text = re.sub(r'\\\+', '+', text)
+            text = re.sub(r'\\times', '*', text)
+            text = re.sub(r'\\cdot', '*', text)
+            text = re.sub(r'\\div', '/', text)
+            # Iterative fraction replacement to handle nesting
+            for _ in range(5):
+                new_text = re.sub(r'\\(?:d|t)?frac\{([^{}]+)\}\{([^{}]+)\}', r'(\1)/(\2)', text)
+                if new_text == text:
+                    break
+                text = new_text
+            text = text.replace('≤', '<=').replace('≥', '>=').replace('≠', '!=').replace('≈', '~=')
+            text = re.sub(r'\^', '^', text)
+            text = re.sub(r'_', '_', text)
+            text = re.sub(r'\\[a-zA-Z]+', '', text)
+            text = re.sub(r'\s+', ' ', text)
+            text = text.strip()
+            return text
+        except Exception as e:
+            logger.warning(f"LaTeX parsing failed, using raw text: {e}")
+            return text
+
+    @staticmethod
+    def extract_modulo(text: str) -> Optional[int]:
+        """Extract modulo value if present."""
+        patterns = [
+            r'mod(?:ulo)?\s+(\d+)',
+            r'%\s*(\d+)',
+            r'\(\s*mod\s+(\d+)\s*\)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+        
+        return None
+
+    @staticmethod
+    def extract_ranges(text: str) -> Dict[str, tuple]:
+        """Extract variable ranges from problem text."""
+        ranges = {}
+        
+        # Patterns: "a ≤ x ≤ b", "a < x ≤ b", "x in [a, b]", "for x = 1, 2, ..., n"
+        range_patterns = [
+            r'(\d+)\s*(?:≤|<=|<)\s*([a-zA-Z])\s*(?:≤|<=|<)\s*(\d+)',
+            r'([a-zA-Z])\s*(?:≤|<=|<)\s*(\d+)',
+            r'([a-zA-Z])\s*(?:≥|>=|>)\s*(\d+)',
+            r'([a-zA-Z])\s*(?:in|∈)\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]',
+            r'for\s+([a-zA-Z])\s*=\s*(\d+)\s*,\s*(\d+)\s*,\s*\.\.\.\s*,\s*(\d+)',
+        ]
+        
+        for pattern in range_patterns:
+            for match in re.finditer(pattern, text):
+                if len(match.groups()) == 3:
+                    if match.group(1).isalpha():
+                        var = match.group(1)
+                        lower = int(match.group(2))
+                        upper = int(match.group(3))
+                    else:
+                        lower = int(match.group(1))
+                        var = match.group(2)
+                        upper = int(match.group(3))
+                    ranges[var] = (lower, upper)
+                elif len(match.groups()) == 2:
+                    var = match.group(1)
+                    bound = int(match.group(2))
+                    if '>=' in match.group(0) or '≥' in match.group(0) or '>' in match.group(0):
+                        ranges[var] = (bound, ranges.get(var, (bound, bound))[1])
+                    else:
+                        ranges[var] = (ranges.get(var, (bound, bound))[0], bound)
+                elif len(match.groups()) == 4:
+                    var = match.group(1)
+                    lower = int(match.group(2))
+                    upper = int(match.group(4))
+                    ranges[var] = (lower, upper)
+        
+        return ranges
+
+    @staticmethod
+    def has_constraints(text: str) -> bool:
+        """Check if problem has explicit constraints."""
+        return bool(re.search(r'(where|such that|given|constraint|modulo|mod|\bmod\b)', 
+                             text, re.IGNORECASE))
 
 
 class CandidateGenerator:
@@ -438,7 +539,7 @@ CODE:
         candidates = []
         
         try:
-                        translation_prompt = f"""You are a math equation extractor. Extract ONLY the mathematical equations.
+            translation_prompt = f"""You are a math equation extractor. Extract ONLY the mathematical equations.
 
 STRICT OUTPUT FORMAT:
 ```json
@@ -460,13 +561,13 @@ JSON:
             equations = []
             if response and isinstance(response.get("equations"), list):
                 equations = [EquationExtractor.normalize_expression(str(e).strip()) for e in response["equations"] if str(e).strip()]
-
+            
             if not equations:
                 equations_text = query_llm(translation_prompt, max_tokens=300, temperature=0.0)
                 if equations_text:
                     extractor = EquationExtractor()
                     equations = extractor.extract_equations(equations_text)
-
+            
             # Validate equations are well-formed
             valid_eqs = []
             for eq in equations:
@@ -485,7 +586,7 @@ JSON:
                 answer, base_conf = result
                 candidates.append((answer, base_conf))
                 logger.info("SymPy solved from deterministic LLM-translated equations")
-        
+            
         except Exception as e:
             logger.debug(f"Translation→solve pipeline error: {e}")
         

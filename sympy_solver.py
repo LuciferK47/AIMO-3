@@ -496,7 +496,7 @@ class SymPySolver:
                         lhs, rhs = eq_str.split('=', 1)
                         sympy_eqs.append(sp.Eq(sp.sympify(lhs), sp.sympify(rhs)))
                     
-                    if sympy_eqs: WITH TIMEOUT PROTECTION
+                    if sympy_eqs:
                         with time_limit(2.0):
                             symbols = sp.symbols(' '.join(var_list))
                         if not isinstance(symbols, tuple):

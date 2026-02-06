@@ -101,47 +101,75 @@ CRITICAL RULES:
 5. Verify your answer satisfies all problem constraints
 """
 
-SYSTEM_PROMPT_EQUATION = """You are an equation extractor for AIMO-3.
+SYSTEM_PROMPT_EQUATION = """You are an equation extractor for AIMO-3 competition.
 
-Your task: Extract mathematical equations from the problem that define the answer.
+TASK: Extract the core mathematical relationship as Python-parseable equations.
 
-OUTPUT FORMAT (strict JSON):
-{
-  "equations": ["3*x + 2 = 11", "x**2 - 4 = 0"],
-  "variables": ["x"],
-  "description": "Brief explanation of what we're solving for"
-}
+OUTPUT FORMAT (strict JSON only, no other text):
+{"equations": ["x**2 - 5*x + 6 = 0"], "variables": ["x"]}
 
-RULES:
-- Output ONLY valid JSON
-- Use ** for exponentiation (not ^)
-- Use * for multiplication
-- Include all equations that constrain the answer
-- If no equations exist, return empty list
+SYNTAX RULES:
+- Exponentiation: ** (NOT ^)
+- Multiplication: * (explicit, e.g., 2*x not 2x)
+- Fractions: use a/b or Rational(a, b)
+- Square root: sqrt(...)
+- Exactly ONE equals sign per equation
 
-PROBLEM: {problem}
+WORKED EXAMPLES:
+
+Problem: "Find x if x squared plus three equals twelve."
+Output: {"equations": ["x**2 + 3 = 12"], "variables": ["x"]}
+
+Problem: "If 2x - 5 = 13, what is x?"
+Output: {"equations": ["2*x - 5 = 13"], "variables": ["x"]}
+
+Problem: "Find the remainder when x^3 + 2x + 1 is divided by x - 2."
+Output: {"equations": ["x**3 + 2*x + 1 = (x - 2)*q + r"], "variables": ["x", "q", "r"]}
+
+NOW EXTRACT FROM:
+{problem}
 """
 
-SYSTEM_PROMPT_PYTHON = """You are a Python expert solving AIMO-3 math problems.
+SYSTEM_PROMPT_PYTHON = """Generate Python code that computes the answer.
 
-OUTPUT: A Python code block that stores the final answer in a variable called `result`.
-
-TEMPLATE:
+TEMPLATE (MUST follow exactly):
 ```python
-# Built-in functions available: factorial, gcd, comb, isqrt, min, max, sum, range, list, set
+# Functions available: gcd, factorial, comb, isqrt, min, max, sum, range, list, set
 # NO imports allowed
-# NO loops > 100000 iterations
+# NO recursion depth > 100
 
-# Your solution here
-result = <your_answer>
+# [Your computation here - max 30 lines]
+
+result = <integer_answer>  # MUST be an integer in [0, 99999]
 ```
 
-CONSTRAINTS:
-- result must be an integer in [0, 99999]
-- NO side effects or printing
-- Use efficient algorithms
+WORKED EXAMPLES:
 
-PROBLEM: {problem}
+Problem: "How many divisors does 120 have?"
+Code:
+```python
+n = 120
+count = 0
+for i in range(1, n + 1):
+    if n % i == 0:
+        count += 1
+result = count
+```
+
+Problem: "Find the last two digits of 7^100."
+Code:
+```python
+result = pow(7, 100, 100)
+```
+
+Problem: "Find the sum of the first 100 positive integers."
+Code:
+```python
+result = 100 * 101 // 2
+```
+
+NOW SOLVE:
+{problem}
 """
 
 # ============================================================================
@@ -204,3 +232,17 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 USE_CACHING = True
 CACHE_RESULT_EXPIRY = 3600  # seconds
 MAX_CACHE_SIZE = 1000
+# ============================================================================
+# CONFIDENCE THRESHOLDS (Principled Scoring)
+# ============================================================================
+
+CONFIDENCE_THRESHOLDS = {
+    'AGREEMENT_HIGH': 0.70,      # 70%+ of candidates agree → return (best, best)
+    'AGREEMENT_MEDIUM': 0.50,    # 50-70% → return (best, second_best)
+    'AGREEMENT_LOW': 0.30,       # <30% → uncertain, use diversity
+    
+    'SYMBOLIC_VERIFIED': 0.95,   # Answer verified by equation substitution
+    'PYTHON_EXECUTED': 0.85,     # Answer from safe_execute
+    'LLM_DIRECT': 0.60,          # Answer from LLM text extraction only
+    'FALLBACK': 0.20,            # Guessed/default answer
+}

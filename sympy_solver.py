@@ -742,6 +742,102 @@ class CombinatoricsSolver:
         return count
 
 
+class NumberTheoryAdvanced:
+    """Advanced number theory solvers."""
+    
+    @staticmethod
+    def chinese_remainder_theorem(residues: List[int], moduli: List[int]) -> Optional[int]:
+        """
+        Solve system of congruences using Chinese Remainder Theorem.
+        
+        Solves: x ≡ residues[i] (mod moduli[i]) for pairwise coprime moduli.
+        
+        Args:
+            residues: List of remainders
+            moduli: List of moduli (must be pairwise coprime)
+            
+        Returns:
+            Solution x in [0, product(moduli)) if exists, else None
+        """
+        if not residues or not moduli or len(residues) != len(moduli):
+            return None
+        
+        try:
+            from functools import reduce
+            
+            def extended_gcd(a, b):
+                """Extended Euclidean algorithm."""
+                if a == 0:
+                    return b, 0, 1
+                g, x, y = extended_gcd(b % a, a)
+                return g, y - (b // a) * x, x
+            
+            # Compute product of all moduli
+            M = reduce(lambda a, b: a * b, moduli, 1)
+            
+            result = 0
+            for r, m in zip(residues, moduli):
+                Mi = M // m
+                g, _, yi = extended_gcd(m, Mi)
+                
+                # Check if coprime
+                if g != 1:
+                    logger.debug(f"CRT: moduli {m} and {M // m} not coprime")
+                    return None
+                
+                result = (result + r * Mi * yi) % M
+            
+            # Return in range [0, 99999] if possible
+            if 0 <= result <= 99999:
+                return result
+            
+            # Try to reduce if result is too large
+            if result > 99999:
+                result = result % 99999
+                if result <= 99999:
+                    return result
+            
+            return None
+        except Exception as e:
+            logger.debug(f"CRT error: {e}")
+            return None
+    
+    @staticmethod
+    def solve_congruence_system(problem_text: str) -> Optional[Tuple[int, float]]:
+        """
+        Detect and solve systems of congruences in problem text.
+        
+        Pattern: "Find x such that x ≡ a (mod m) and x ≡ b (mod n)..."
+        """
+        try:
+            import re
+            problem_lower = problem_text.lower()
+            
+            # Pattern: x ≡ a (mod m)
+            pattern = r'([a-z])\s*(?:≡|=)\s*(\d+)\s*\(\s*(?:mod|modulo)\s+(\d+)\s*\)'
+            matches = re.findall(pattern, problem_text)
+            
+            if len(matches) < 2:
+                return None
+            
+            # Extract residues and moduli
+            residues = []
+            moduli = []
+            for var, residue, modulus in matches:
+                residues.append(int(residue))
+                moduli.append(int(modulus))
+            
+            # Solve using CRT
+            solution = NumberTheoryAdvanced.chinese_remainder_theorem(residues, moduli)
+            if solution is not None:
+                return (solution, 0.85)
+            
+            return None
+        except Exception as e:
+            logger.debug(f"Congruence system solving error: {e}")
+            return None
+
+
 class GeometrySolver:
     """Geometry specific solvers."""
     

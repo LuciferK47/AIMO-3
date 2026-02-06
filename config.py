@@ -198,20 +198,9 @@ LOG_LEVEL = "INFO"  # DEBUG, INFO, WARNING, ERROR
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 # ============================================================================
-# ADVANCED FEATURES
+# CACHING CONFIGURATION
 # ============================================================================
 
-# Feature flags
-USE_PRM_FILTERING = True
-USE_DYNAMIC_ALLOCATION = True
-USE_OPTIMAL_WEIGHTING = True
 USE_CACHING = True
-
-# Cache configuration
 CACHE_RESULT_EXPIRY = 3600  # seconds
 MAX_CACHE_SIZE = 1000
-
-# DEBUG flag for logging configuration load (avoid polluting Kaggle logs)
-_DEBUG = False
-if _DEBUG:
-    print("✓ Configuration loaded successfully")

@@ -93,46 +93,75 @@ def time_limit(seconds: float):
 
 
 def extract_integers(text: str) -> List[int]:
-    """Extract all integers from text output. Clamped to [0, 99999]."""
+    """
+    Extract integers from text with priority ordering.
+    
+    Priority (highest to lowest):
+    1. Boxed answers: \\boxed{42}
+    2. Explicit answer statements: "answer is 42"
+    3. Code assignment: result = 42
+    4. Last number in text
+    5. All numbers found (deduplicated)
+    
+    Clamped to [0, 99999].
+    """
     if not text:
         return []
     
     answers = []
+    seen = set()
     
-    boxed_match = re.search(r'\\boxed\{(-?\d+)\}', text)
-    if boxed_match:
-        val = int(boxed_match.group(1))
-        if 0 <= val <= 99999:
+    # Priority 1: Boxed answer (highest priority)
+    boxed_matches = re.findall(r'\\boxed\{(-?\d+)\}', text)
+    for match in boxed_matches:
+        val = int(match)
+        if 0 <= val <= 99999 and val not in seen:
             answers.append(val)
+            seen.add(val)
     
-    answer_match = re.search(r'(?:answer|result|solution)[\s:]*(-?\d+)', text, re.IGNORECASE)
-    if answer_match:
-        val = int(answer_match.group(1))
-        if 0 <= val <= 99999:
+    # Priority 2: Explicit answer statements
+    answer_patterns = [
+        r'(?:answer|final answer|solution)[\s:=]*(-?\d+)',
+        r'result[\s:=]*(-?\d+)',
+        r'the answer is[\s:]*(-?\d+)',
+    ]
+    for pattern in answer_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            val = int(match.group(1))
+            if 0 <= val <= 99999 and val not in seen:
+                answers.append(val)
+                seen.add(val)
+    
+    # Priority 3: Code assignment (result = ...)
+    code_match = re.search(r'result\s*=\s*(\d+)', text)
+    if code_match:
+        val = int(code_match.group(1))
+        if 0 <= val <= 99999 and val not in seen:
             answers.append(val)
+            seen.add(val)
     
+    # Priority 4: Last number in text
     all_numbers = re.findall(r'-?\d+', text)
     if all_numbers:
         last_num = int(all_numbers[-1])
-        if 0 <= last_num <= 99999:
+        if 0 <= last_num <= 99999 and last_num not in seen:
             answers.append(last_num)
+            seen.add(last_num)
     
+    # Priority 5: All positive integers found (deduplicated)
     valid_numbers = []
     for num_str in re.findall(r'\d+', text):
         num = int(num_str)
-        if 0 <= num <= 99999:
+        if 0 <= num <= 99999 and num not in seen:
             valid_numbers.append(num)
+            seen.add(num)
     
-    seen = set()
-    unique_answers = []
-    for ans in answers + valid_numbers:
-        if ans not in seen:
-            unique_answers.append(ans)
-            seen.add(ans)
+    answers.extend(valid_numbers)
     
-    # Return empty list if no valid integers found (don't default to 0)
+    # Return empty list if no valid integers found
     # 0 is a valid answer and shouldn't be forced as fallback
-    return unique_answers
+    return answers
 
 
 def clamp_to_range(value: Any, min_val: int = 0, max_val: int = 99999) -> int:

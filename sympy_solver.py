@@ -460,6 +460,19 @@ class SymPySolver:
             return None
         
         try:
+            # GUARD: Check polynomial degree (D3 recommendation)
+            # Skip if any equation has very high degree
+            for eq_str in equations:
+                try:
+                    expr = safe_sympify(eq_str)
+                    if expr is not None:
+                        poly = sp.Poly(expr)
+                        if poly.total_degree() > 6:
+                            logger.debug(f"High-degree polynomial ({poly.total_degree()}), skipping")
+                            return None
+                except Exception:
+                    pass  # Continue if we can't determine degree
+            
             # Extract all unique variables from equations
             all_vars = set()
             for eq in equations:

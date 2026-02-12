@@ -138,12 +138,15 @@ class AnswerValidator:
     
     @staticmethod
     def check_divisibility(answer: int, problem_text: str) -> bool:
-        """Check divisibility constraints mentioned in problem."""
+        """Check divisibility constraints ONLY when answer itself must be divisible."""
         problem_lower = problem_text.lower()
         
+        # TARGETED: Only apply divisibility when it's about the answer/result/solution
+        # NOT when describing intermediate variables (e.g., "N is divisible by 7, find N/7")
         patterns = [
-            r'divisible by (\d+)',
-            r'multiple of (\d+)',
+            r'(?:answer|result|solution)\s+(?:is|must be)\s+divisible by (\d+)',
+            r'(?:answer|result|solution)\s+(?:is|must be)\s+(?:a\s+)?multiple of (\d+)',
+            r'find\s+(?:a|the)\s+multiple of (\d+)',
         ]
         
         for pattern in patterns:
@@ -217,19 +220,22 @@ class AnswerValidator:
                 except Exception:
                     pass
         
-        # Rule 3: Parity constraint
-        if 'even' in problem_lower and 'answer' in problem_lower:
+        # Rule 3: Parity constraint - ONLY if answer itself must be even/odd
+        # Patterns that explicitly constrain the ANSWER (not context variables)
+        if re.search(r'(?:answer|result|solution)\s+(?:is|must be|will be)\s+even', problem_lower):
             if answer % 2 != 0:
                 logger.debug(f"Rejecting {answer}: answer must be even")
                 return True
         
-        if 'odd' in problem_lower and 'answer' in problem_lower:
+        if re.search(r'(?:answer|result|solution)\s+(?:is|must be|will be)\s+odd', problem_lower):
             if answer % 2 == 0:
                 logger.debug(f"Rejecting {answer}: answer must be odd")
                 return True
         
-        # Rule 4: Prime constraint
-        if 'prime' in problem_lower:
+        # Rule 4: Prime constraint - ONLY if explicitly asking for a prime answer
+        # NOT just when "prime" appears contextually (e.g., "let p be prime...")
+        if re.search(r'(?:find|what is)\s+(?:the|a)\s+prime\b', problem_lower) or \
+           re.search(r'(?:answer|result|solution)\s+(?:is|must be)\s+(?:a\s+)?prime', problem_lower):
             from sympy import isprime
             if not isprime(answer):
                 logger.debug(f"Rejecting {answer}: answer must be prime")

@@ -44,6 +44,7 @@ LLM_TEMPERATURE_DETERMINISTIC = 0.0  # For all LLM calls (deterministic)
 MAX_TOKENS_EQUATION = 300
 MAX_TOKENS_PYTHON = 256
 MAX_TOKENS_ENUM = 200
+MAX_TOKENS_REASONING = 420
 
 # Timeouts
 TIMEOUT_PER_STRATEGY = 5.0  # Maximum time per strategy
@@ -93,12 +94,23 @@ Your task is to solve integer-based mathematical problems from various domains:
 - Geometry: Coordinate geometry, angles, areas
 - Combinatorics: Counting, permutations, graph theory
 
-CRITICAL RULES:
-1. Think step-by-step
-2. Show all reasoning
-3. Final answer must be an integer in [0, 99999]
-4. Format your final answer as: "The answer is [number]"
-5. Verify your answer satisfies all problem constraints
+CRITICAL RULES (MANDATORY):
+1. Do NOT guess. If unsure, state assumptions explicitly.
+2. Provide structured derivation only.
+3. Final answer must be an integer in [0, 99999].
+4. Output must follow the exact format below.
+5. Do NOT include any other text.
+
+OUTPUT FORMAT (STRICT):
+DERIVATION:
+- Step 1: ...
+- Step 2: ...
+
+FINAL_EXPRESSION:
+<explicit formula>
+
+FINAL_INTEGER:
+<integer>
 """
 
 SYSTEM_PROMPT_EQUATION = """You are an equation extractor for AIMO-3 competition.
@@ -169,6 +181,29 @@ result = 100 * 101 // 2
 ```
 
 NOW SOLVE:
+{problem}
+"""
+
+SYSTEM_PROMPT_REASONING = """You are a theorem prover and must output a structured derivation only.
+
+Rules:
+- Do NOT guess. If uncertain, state assumptions explicitly in DERIVATION.
+- Final answer must be an integer in [0, 99999].
+- Output must follow the exact format below. Any deviation is invalid.
+- Do NOT include any other text outside the format.
+
+OUTPUT FORMAT (STRICT):
+DERIVATION:
+- Step 1: ...
+- Step 2: ...
+
+FINAL_EXPRESSION:
+<explicit formula>
+
+FINAL_INTEGER:
+<integer>
+
+PROBLEM:
 {problem}
 """
 

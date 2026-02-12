@@ -694,6 +694,142 @@ class NumberTheorySolver:
                 return int(totient(n))
             except Exception:
                 return None
+    
+    @staticmethod
+    def multiplicative_order(a: int, m: int) -> Optional[int]:
+        """
+        Find smallest positive k such that a^k ≡ 1 (mod m).
+        Returns None if order doesn't exist (gcd(a, m) ≠ 1).
+        
+        ADDED: Section D1 - Number Theory Missing Techniques
+        """
+        if NumberTheorySolver.compute_gcd(a, m) != 1:
+            return None
+        
+        if not SYMPY_AVAILABLE:
+            # Brute-force fallback
+            phi = NumberTheorySolver.euler_totient(m)
+            if phi is None:
+                phi = m  # Upper bound
+            for k in range(1, phi + 1):
+                if pow(a, k, m) == 1:
+                    return k
+            return None
+        
+        try:
+            from sympy.ntheory import n_order
+            return int(n_order(a, m))
+        except:
+            # Fallback: check divisors of φ(m)
+            phi = NumberTheorySolver.euler_totient(m)
+            if phi is None:
+                return None
+            for k in range(1, phi + 1):
+                if pow(a, k, m) == 1:
+                    return k
+            return None
+    
+    @staticmethod
+    def sum_of_divisors(n: int) -> int:
+        """
+        Compute sum of all divisors of n (including 1 and n).
+        σ(n) function.
+        
+        ADDED: Section D1 - Number Theory Missing Techniques
+        """
+        if not SYMPY_AVAILABLE:
+            # Fallback: brute-force
+            total = 0
+            for i in range(1, int(n**0.5) + 1):
+                if n % i == 0:
+                    total += i
+                    if i != n // i:
+                        total += n // i
+            return total
+        
+        try:
+            from sympy.ntheory import divisor_sigma
+            return int(divisor_sigma(n, 1))
+        except:
+            # Fallback
+            total = 0
+            for i in range(1, int(n**0.5) + 1):
+                if n % i == 0:
+                    total += i
+                    if i != n // i:
+                        total += n // i
+            return total
+    
+    @staticmethod
+    def count_divisors(n: int) -> int:
+        """
+        Count number of divisors of n (including 1 and n).
+        τ(n) or d(n) function.
+        
+        ADDED: Section D1 - Number Theory Missing Techniques
+        """
+        if not SYMPY_AVAILABLE:
+            count = 0
+            for i in range(1, int(n**0.5) + 1):
+                if n % i == 0:
+                    count += 1 if i == n // i else 2
+            return count
+        
+        try:
+            from sympy.ntheory import divisor_count
+            return int(divisor_count(n))
+        except:
+            count = 0
+            for i in range(1, int(n**0.5) + 1):
+                if n % i == 0:
+                    count += 1 if i == n // i else 2
+            return count
+    
+    @staticmethod
+    def legendre_symbol(a: int, p: int) -> int:
+        """
+        Compute Legendre symbol (a/p).
+        Returns 0 if p | a, 1 if a is quadratic residue mod p, -1 otherwise.
+        
+        ADDED: Section D1 - Number Theory Missing Techniques
+        """
+        if not NumberTheorySolver.is_prime(p):
+            return 0
+        
+        a = a % p
+        if a == 0:
+            return 0
+        
+        # Using Euler's criterion: (a/p) = a^((p-1)/2) mod p
+        result = pow(a, (p - 1) // 2, p)
+        return -1 if result == p - 1 else result
+    
+    @staticmethod
+    def mobius(n: int) -> int:
+        """
+        Compute Möbius function μ(n).
+        Returns:
+            1 if n is square-free with even number of prime factors
+            -1 if n is square-free with odd number of prime factors
+            0 if n is not square-free
+        
+        ADDED: Section D1 - Number Theory Missing Techniques  
+        """
+        if n <= 0:
+            return 0
+        if n == 1:
+            return 1
+        
+        factors = NumberTheorySolver.prime_factorization(n)
+        
+        # If any prime appears more than once, n is not square-free
+        for exp in factors.values():
+            if exp > 1:
+                return 0
+        
+        # Count distinct prime factors
+        num_primes = len(factors)
+        return (-1) ** num_primes
 
 
 class CombinatoricsSolver:

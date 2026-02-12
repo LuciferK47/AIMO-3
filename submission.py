@@ -22,10 +22,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 try:
-    from solver import solve_problem
+    from solver import AdaptiveSolver
 except ImportError as e:
     logger.error(f"Failed to import solver: {e}")
     raise
+
+
+_solver = None
 
 
 def solve(problem_text: str) -> Tuple[int, int]:
@@ -38,9 +41,14 @@ def solve(problem_text: str) -> Tuple[int, int]:
     Returns:
         (answer1, answer2) - integer tuple for submission
     """
+    global _solver
+    
+    if _solver is None:
+        logger.info("Initializing solver...")
+        _solver = AdaptiveSolver()
+    
     try:
-        logger.info("Calling clean solver pipeline...")
-        answer1, answer2 = solve_problem(problem_text)
+        answer1, answer2 = _solver.solve(problem_text, timeout_seconds=30)
         logger.info(f"Answer: ({answer1}, {answer2})")
         return (answer1, answer2)
     except Exception as e:

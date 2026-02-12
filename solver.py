@@ -1,37 +1,52 @@
-"""
-AIMO-3 SOLVER - Implementing Critical Analysis Recommendations
-
-ARCHITECTURE (Based on Section G - Final Recommended Pipeline):
-1. Normalize & Classify (0.3s)
-2. Code Generation PRIMARY (8s) - LLM → Python → Execute
-3. Equation Extraction FALLBACK (6s) - LLM → SymPy
-4. Hard Filters (0.5s)
-5. Verification (3s) 
-6. Selection: (best, best) ALWAYS unless confidence < 0.3
-
-KEY FIXES FROM CRITICAL ANALYSIS:
-✅ Code generation promoted to Strategy 1 (Section D2)
-✅ max_tokens increased to 600 (Section E2)
-✅ Chain-of-thought allowed in prompts (Section E1)
-✅ Code fence cleaning before execution (Section E3)
-✅ Retry loop with syntax error feedback (Section E3)
-✅ (best, best) strategy unless extremely uncertain (Section F2)
-✅ Narrowed validation filters (Section F1 - implemented in validation.py)
-"""
-
 import logging
 import re
 import time
 import ast
+import signal
 from typing import List, Tuple, Optional, Dict, Any
+from contextlib import contextmanager
 
 from config import *
-from utils import preprocess_problem_text, query_llm, ensure_determinism, time_limit
+from utils import preprocess_problem_text, query_llm, ensure_determinism
 from sympy_solver import SymPySolver, EquationExtractor
 from validation import AnswerValidator
 from safe_executor import safe_execute, validate_code
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# SIGNAL-BASED TIMEOUT (Section H #9 - More Reliable)
+# ============================================================================
+
+class TimeoutError(Exception):
+    """Raised when operation exceeds timeout."""
+    pass
+
+
+@contextmanager
+def timeout_signal(seconds: float):
+    """
+    Context manager for signal-based timeout.
+    More reliable than thread-based interrupts for blocking operations.
+    
+    Example:
+        with timeout_signal(5.0):
+            result = expensive_operation()
+    """
+    def _timeout_handler(signum, frame):
+        raise TimeoutError(f"Operation timed out after {seconds}s")
+    
+    # Set up signal handler
+    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    
+    try:
+        yield
+    finally:
+        # Restore previous handler and cancel alarm
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 # ============================================================================
@@ -78,6 +93,39 @@ RULES:
 Example:
 Problem: "Find x where x^2 + 2*x - 3 = 0 and x > 0"
 Output: {"equations": ["x**2 + 2*x - 3"], "variables": ["x"]}
+"""
+
+DIRECT_ANSWER_SYSTEM = """You are a competition mathematics expert.
+Given an Olympiad problem, provide the final integer answer ONLY.
+
+CRITICAL RULES:
+1. Think through the problem step-by-step (you can show brief reasoning)
+2. The answer MUST be a single integer in range [0, 99999]
+3. Output format: FINAL_ANSWER: [integer]
+4. Be absolutely certain - this is a last resort fallback
+
+Example:
+Problem: "What is 7^3 mod 10?"
+Thought: 7^3 = 343, 343 mod 10 = 3
+FINAL_ANSWER: 3
+"""
+
+VERIFICATION_CODE_SYSTEM = """You are a competition mathematics verification expert.
+Given a problem and a proposed answer, write Python code to CHECK if the answer is correct.
+
+CRITICAL RULES:
+1. Write code that VERIFIES the proposed answer
+2. Store True/False in variable 'is_correct'
+3. Use basic Python only (no imports)
+4. Be thorough - check all constraints
+
+Output format:
+```python
+# Verification approach: [explain]
+proposed_answer = [value]
+# Check constraints...
+is_correct = [True/False]
+```
 """
 
 
@@ -210,6 +258,20 @@ class CandidateGenerator:
             if answer is not None:
                 candidates.append((answer, 0.65))
                 logger.info(f"Equation extraction: {answer}")
+                # STRATEGY 3: DIRECT LLM ANSWER (LAST RESORT - Section H #10)
+        if not candidates:
+            logger.info("Strategy 3: Direct LLM answer extraction (last resort)")
+            answer = self._try_direct_answer(problem_text)
+            if answer is not None:
+                candidates.append((answer, 0.40))  # Low confidence - last resort
+                logger.info(f"Direct answer: {answer}")
+                # STRATEGY 3: DIRECT LLM ANSWER (LAST RESORT - Section H #10)
+        if not candidates:
+            logger.info("Strategy 3: Direct LLM answer extraction (last resort)")
+            answer = self._try_direct_answer(problem_text)
+            if answer is not None:
+                candidates.append((answer, 0.40))  # Low confidence - last resort
+                logger.info(f"Direct answer: {answer}")
         
         return candidates
     
@@ -258,6 +320,74 @@ class CandidateGenerator:
             logger.debug(f"Equation extraction failed: {e}")
         
         return None
+    
+    def _try_direct_answer(self, problem_text: str) -> Optional[int]:
+        """
+        LAST RESORT: Ask LLM directly for the final answer.
+        Section H #10 - Fallback when all strategies fail.
+        """
+        prompt = f"{DIRECT_ANSWER_SYSTEM}\n\nPROBLEM:\n{problem_text}"
+        
+        try:
+            response = query_llm(prompt, max_tokens=400, temperature=0.0)
+            if not response:
+                return None
+            
+            # Extract FINAL_ANSWER: [number]
+            match = re.search(r'FINAL_ANSWER:\s*(-?\d+)', response, re.IGNORECASE)
+            if match:
+                answer = int(match.group(1))
+                if AnswerValidator.check_range(answer):
+                    logger.info(f"Direct LLM extraction found: {answer}")
+                    return answer
+            
+            # Fallback: try to find any integer in the response
+            numbers = re.findall(r'\b(\d+)\b', response)
+            if numbers:
+                # Take the last number mentioned (often the final answer)
+                answer = int(numbers[-1])
+                if AnswerValidator.check_range(answer):
+                    logger.info(f"Extracted last number: {answer}")
+                    return answer
+        
+        except Exception as e:
+            logger.debug(f"Direct answer extraction failed: {e}")
+        
+        return None
+    
+    def _try_direct_answer(self, problem_text: str) -> Optional[int]:
+        """
+        LAST RESORT: Ask LLM directly for the final answer.
+        Section H #10 - Fallback when all strategies fail.
+        """
+        prompt = f"{DIRECT_ANSWER_SYSTEM}\n\nPROBLEM:\n{problem_text}"
+        
+        try:
+            response = query_llm(prompt, max_tokens=400, temperature=0.0)
+            if not response:
+                return None
+            
+            # Extract FINAL_ANSWER: [number]
+            match = re.search(r'FINAL_ANSWER:\s*(-?\d+)', response, re.IGNORECASE)
+            if match:
+                answer = int(match.group(1))
+                if AnswerValidator.check_range(answer):
+                    logger.info(f"Direct LLM extraction found: {answer}")
+                    return answer
+            
+            # Fallback: try to find any integer in the response
+            numbers = re.findall(r'\b(\d+)\b', response)
+            if numbers:
+                # Take the last number mentioned (often the final answer)
+                answer = int(numbers[-1])
+                if AnswerValidator.check_range(answer):
+                    logger.info(f"Extracted last number: {answer}")
+                    return answer
+        
+        except Exception as e:
+            logger.debug(f"Direct answer extraction failed: {e}")
+        
+        return None
 
 
 # ============================================================================
@@ -302,6 +432,14 @@ class AnswerArbitrator:
         except:
             pass
         
+        # Execution-based verification (Section F3 - Additional Check)
+        # Only apply for low-confidence answers as extra validation
+        if best_conf < 0.50:
+            verified = self._verify_by_execution(problem_text, best_ans)
+            if verified is False:  # Explicit rejection
+                logger.debug(f"Execution verification rejected {best_ans}")
+                return (0, 0)
+        
         # CORRECTED: Return (best, best) unless extremely uncertain
         if best_conf >= 0.30:
             return (best_ans, best_ans)
@@ -313,6 +451,41 @@ class AnswerArbitrator:
                 return (best_ans, second_ans)
         
         return (best_ans, best_ans)
+    
+    def _verify_by_execution(self, problem_text: str, answer: int) -> Optional[bool]:
+        """
+        Ask LLM to write verification code for the proposed answer.
+        Section F3 - Execution-based verification.
+        
+        Returns:
+            True if verified, False if rejected, None if inconclusive
+        """
+        prompt = f"{VERIFICATION_CODE_SYSTEM}\n\nPROBLEM:\n{problem_text}\n\nPROPOSED ANSWER: {answer}\n\nWrite verification code:"
+        
+        try:
+            response = query_llm(prompt, max_tokens=400, temperature=0.0)
+            if not response:
+                return None
+            
+            # Extract code
+            code = clean_llm_code(response)
+            if not code:
+                return None
+            
+            # Execute verification code
+            result = safe_execute(code, timeout=3.0, expected_var='is_correct')
+            
+            if result is True:
+                logger.debug(f"Execution verification confirmed {answer}")
+                return True
+            elif result is False:
+                logger.debug(f"Execution verification rejected {answer}")
+                return False
+            
+        except Exception as e:
+            logger.debug(f"Verification execution failed: {e}")
+        
+        return None  # Inconclusive
 
 
 # ============================================================================
@@ -327,7 +500,7 @@ class StrategyArbiter:
         self.start_time = None
     
     def solve(self, problem_text: str) -> Tuple[int, int]:
-        """MASTER PIPELINE."""
+        """MASTER PIPELINE with signal-based timeout (Section H #9)."""
         self.start_time = time.time()
         if USE_FIXED_SEED:
             ensure_determinism(RANDOM_SEED)
@@ -336,9 +509,12 @@ class StrategyArbiter:
             # STAGE 1: PARSE & CLASSIFY
             logger.info("STAGE 1: Parse and classify")
             try:
-                with time_limit(0.5):
+                with timeout_signal(0.5):
                     problem_text = preprocess_problem_text(problem_text)
                     classification = ProblemClassifier.classify(problem_text)
+            except TimeoutError:
+                logger.warning("Parse timeout")
+                return (0, 0)
             except Exception as e:
                 logger.error(f"Parse error: {e}")
                 return (0, 0)
@@ -347,23 +523,30 @@ class StrategyArbiter:
             logger.info("STAGE 2: Generate candidates")
             try:
                 remaining = max(0.1, self.timeout - (time.time() - self.start_time))
-                with time_limit(min(remaining, 14.0)):
+                with timeout_signal(min(remaining, 14.0)):
                     generator = CandidateGenerator()
                     candidates = generator.generate(problem_text, classification)
+            except TimeoutError:
+                logger.warning("Generation timeout")
+                candidates = []
             except Exception as e:
                 logger.error(f"Generation error: {e}")
                 candidates = []
             
             if not candidates:
+                logger.warning("No candidates generated")
                 return (0, 0)
             
             # STAGE 3: VERIFY & SELECT
             logger.info("STAGE 3: Verify and select")
             try:
                 remaining = max(0.1, self.timeout - (time.time() - self.start_time))
-                with time_limit(remaining):
+                with timeout_signal(remaining):
                     arbitrator = AnswerArbitrator()
                     return arbitrator.arbitrate(candidates, problem_text)
+            except TimeoutError:
+                logger.warning("Verification timeout")
+                return (0, 0)
             except Exception as e:
                 logger.error(f"Verification error: {e}")
                 return (0, 0)
